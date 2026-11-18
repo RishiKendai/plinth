@@ -43,9 +43,11 @@ type Transaction struct {
 	ReplacesID          *string    `json:"replaces_id"`
 	ReplacedBy          *string    `json:"replaced_by"`
 	Tags                []string   `json:"tags"`
-	Version             int        `json:"version"`
-	CreatedAt           time.Time  `json:"created_at"`
-	UpdatedAt           time.Time  `json:"updated_at"`
+	// CountedAmount is the part that counts as the user's own spending (budgets, trackers). Null means all of it.
+	CountedAmount *int64    `json:"counted_amount"`
+	Version       int       `json:"version"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // Signed returns the effect on the account: negative leaves it.
@@ -117,6 +119,7 @@ type NewTx struct {
 	RefundOf      *string
 	ReplacesID    *string
 	Tags          []string
+	CountedAmount *int64 // see Transaction.CountedAmount; internal modules only
 }
 
 func trim(s string) string { return strings.TrimSpace(s) }
@@ -154,6 +157,9 @@ func (n *NewTx) validate() map[string]string {
 		f["amount"] = "Enter an amount greater than zero."
 	} else if n.Amount > maxAmount {
 		f["amount"] = "That amount is too large."
+	}
+	if n.CountedAmount != nil && (*n.CountedAmount < 0 || *n.CountedAmount > n.Amount) {
+		f["counted_amount"] = "The counted amount must be between zero and the amount."
 	}
 	if !paymentMethods[n.PaymentMethod] {
 		f["payment_method"] = "Choose a valid payment method."

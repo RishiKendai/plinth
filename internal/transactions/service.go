@@ -36,14 +36,14 @@ const txCols = `t.id::text, t.account_id::text, t.type, t.amount, t.currency, t.
 	CASE WHEN t.transfer_id IS NULL THEN NULL ELSE (SELECT o.account_id::text FROM transactions o WHERE o.transfer_id = t.transfer_id AND o.id <> t.id LIMIT 1) END,
 	t.refund_of::text, t.replaces_id::text, (SELECT r.id::text FROM transactions r WHERE r.replaces_id = t.id LIMIT 1),
 	COALESCE((SELECT array_agg(tg.name ORDER BY lower(tg.name)) FROM transaction_tags tt JOIN tags tg ON tg.id = tt.tag_id WHERE tt.transaction_id = t.id), '{}'::text[]),
-	t.version, t.created_at, t.updated_at`
+	t.counted_amount, t.version, t.created_at, t.updated_at`
 
 func scanTx(row interface{ Scan(...any) error }) (Transaction, error) {
 	var t Transaction
 	err := row.Scan(&t.ID, &t.AccountID, &t.Type, &t.Amount, &t.Currency, &t.Title, &t.Description, &t.CategoryID,
 		&t.PaymentMethod, &t.PayerName, &t.PayeeName, &t.Status, &t.OccurredAt, &t.PostedAt, &t.Timezone, &t.Notes, &t.Location,
 		&t.Latitude, &t.Longitude, &t.Source, &t.ExternalRef, &t.TransferID, &t.TransferDirection, &t.CounterpartyAccount,
-		&t.RefundOf, &t.ReplacesID, &t.ReplacedBy, &t.Tags, &t.Version, &t.CreatedAt, &t.UpdatedAt)
+		&t.RefundOf, &t.ReplacesID, &t.ReplacedBy, &t.Tags, &t.CountedAmount, &t.Version, &t.CreatedAt, &t.UpdatedAt)
 	t.OccurredAt = t.OccurredAt.UTC()
 	t.CreatedAt, t.UpdatedAt = t.CreatedAt.UTC(), t.UpdatedAt.UTC()
 	if t.PostedAt != nil {
@@ -151,11 +151,11 @@ func write(ctx context.Context, tx pgx.Tx, userID, currency string, n NewTx) err
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO transactions (id, user_id, account_id, type, amount, currency, title, description, category_id,
 		payment_method, payer_name, payee_name, status, occurred_at, posted_at, timezone, notes, location, latitude, longitude,
-		source, external_ref, transfer_id, transfer_direction, refund_of, replaces_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`,
+		source, external_ref, transfer_id, transfer_direction, refund_of, replaces_id, counted_amount)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)`,
 		n.ID, userID, n.AccountID, n.Type, n.Amount, currency, n.Title, n.Description, n.CategoryID,
 		n.PaymentMethod, n.PayerName, n.PayeeName, n.Status, n.OccurredAt, posted, n.Timezone, n.Notes, n.Location, n.Latitude, n.Longitude,
-		n.Source, n.ExternalRef, n.TransferID, n.TransferDir, n.RefundOf, n.ReplacesID)
+		n.Source, n.ExternalRef, n.TransferID, n.TransferDir, n.RefundOf, n.ReplacesID, n.CountedAmount)
 	if err != nil {
 		switch dbx.ConstraintName(err) {
 		case "transactions_source_event_key":
@@ -474,4 +474,52 @@ func (s *Service) ownsAccount(ctx context.Context, userID, accountID string) err
 		return apierr.ErrNotFound
 	}
 	return err
+}
+
+// VoidInTx voids a transaction (and both legs of a transfer) inside the caller's database transaction. Other modules
+// (CSV import undo, group expenses) use it so reversals follow the same rules. Already-closed transactions are left
+// alone, which makes it safe to call twice.
+func (s *Service) VoidInTx(ctx context.Context, tx pgx.Tx, userID, id string) error {
+	ls, err := legs(ctx, tx, userID, id)
+	if err != nil {
+		return err
+	}
+	if err := lockLegAccounts(ctx, tx, userID, ls); err != nil {
+		return err
+	}
+	for _, l := range ls {
+		if l.Status == "failed" || l.Status == "cancelled" || l.Status == "reversed" {
+			continue
+		}
+		to := "cancelled"
+		if l.Status == "confirmed" {
+			to = "reversed"
+		}
+		if err := applyStatus(ctx, tx, userID, l, to); err != nil {
+			return err
+		}
+	}
+	return audit.Log(ctx, tx, userID, "transaction.voided", map[string]any{"transaction_id": id, "by": "system"})
+}
+
+// ChangeStatusInTx applies a status transition inside the caller's database transaction. Other modules (UPI outcomes,
+// bank-message verification) use it so the transition table and ledger rules stay in one place. It returns the
+// transaction after the change.
+func (s *Service) ChangeStatusInTx(ctx context.Context, tx pgx.Tx, userID, id, to string) (Transaction, error) {
+	ls, err := legs(ctx, tx, userID, id)
+	if err != nil {
+		return Transaction{}, err
+	}
+	if err := lockLegAccounts(ctx, tx, userID, ls); err != nil {
+		return Transaction{}, err
+	}
+	for _, l := range ls {
+		if err := applyStatus(ctx, tx, userID, l, to); err != nil {
+			return Transaction{}, err
+		}
+	}
+	if err := audit.Log(ctx, tx, userID, "transaction.status_changed", map[string]any{"transaction_id": id, "from": ls[0].Status, "to": to}); err != nil {
+		return Transaction{}, err
+	}
+	return load(ctx, tx, userID, id)
 }

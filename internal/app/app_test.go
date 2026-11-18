@@ -19,6 +19,7 @@ import (
 	"plinth/server/internal/app"
 	"plinth/server/internal/platform/config"
 	"plinth/server/internal/platform/security"
+	"plinth/server/internal/platform/storage"
 	"plinth/server/internal/platform/testdb"
 )
 
@@ -37,19 +38,29 @@ func TestMain(m *testing.M) {
 }
 
 type env struct {
-	srv *httptest.Server
+	srv   *httptest.Server
+	store *storage.Memory
 }
 
-func setup(t *testing.T) *env {
+func setup(t *testing.T) *env { return setupWith(t, true) }
+
+// setupWith builds the app. withStorage=false leaves object storage unconfigured, as on a server without R2.
+func setupWith(t *testing.T, withStorage bool) *env {
 	t.Helper()
 	testdb.Truncate(t, pool)
 	cfg := config.Config{Env: "development", TokenPepper: []byte(strings.Repeat("p", 32)),
 		AccessTokenTTL: 15 * time.Minute, RefreshTokenTTL: time.Hour, RequestTimeout: 10 * time.Second}
-	h, _ := app.New(app.Deps{Config: cfg, DB: pool, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Hasher: security.Hasher{Time: 1, MemoryKiB: 64, Threads: 1}})
+	var mem *storage.Memory
+	deps := app.Deps{Config: cfg, DB: pool, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Hasher: security.Hasher{Time: 1, MemoryKiB: 64, Threads: 1}}
+	if withStorage {
+		mem = storage.NewMemory()
+		deps.Store = mem
+	}
+	h, _ := app.New(deps)
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return &env{srv: srv}
+	return &env{srv: srv, store: mem}
 }
 
 type resp struct {

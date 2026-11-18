@@ -164,7 +164,7 @@ func limitFor(ls []limitRow, start time.Time) int64 {
 var bucketUnit = map[string]string{"weekly": "week", "monthly": "month", "quarterly": "quarter", "yearly": "year"}
 
 // spentByPeriod returns net spend per period start between from and to (civil dates, inclusive). Eligible spend
-// (docs/budgets.md): expenses that are pending or confirmed, not reconcile adjustments, in the budget currency,
+// (docs/planning-rules.md): expenses that are pending or confirmed, not reconcile or settlement entries, counting only counted_amount when set, in the budget currency,
 // inside the account and category scope (a category includes its subcategories), dated in the budget's zone.
 // Transfers are never expenses. Each linked refund is subtracted in the period of the expense it refunds.
 func (s *Service) spentByPeriod(ctx context.Context, q dbx.Q, userID string, b Budget, from, to time.Time) (map[string]int64, error) {
@@ -173,8 +173,8 @@ func (s *Service) spentByPeriod(ctx context.Context, q dbx.Q, userID string, b B
 		bucket = `date_trunc('` + unit + `', (t.occurred_at AT TIME ZONE $7))::date`
 	}
 	rows, err := q.Query(ctx, `WITH e AS (
-			SELECT t.id, t.amount, `+bucket+` AS b FROM transactions t
-			WHERE t.user_id = $1 AND t.type = 'expense' AND t.status IN ('pending','confirmed') AND t.source <> 'reconcile' AND t.currency = $2
+			SELECT t.id, COALESCE(t.counted_amount, t.amount) AS amount, `+bucket+` AS b FROM transactions t
+			WHERE t.user_id = $1 AND t.type = 'expense' AND t.status IN ('pending','confirmed') AND t.source NOT IN ('reconcile','settlement') AND t.currency = $2
 			  AND ($3::uuid IS NULL OR t.account_id = $3)
 			  AND ($4::uuid IS NULL OR t.category_id = $4 OR t.category_id IN (SELECT id FROM categories WHERE parent_id = $4))
 			  AND (t.occurred_at AT TIME ZONE $7)::date BETWEEN $5 AND $6 AND $8::date IS NOT NULL)

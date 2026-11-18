@@ -49,7 +49,7 @@ func (in UpdateInput) merge(t Transaction) NewTx {
 		CategoryID: t.CategoryID, PaymentMethod: t.PaymentMethod, PayerName: t.PayerName, PayeeName: t.PayeeName, Status: t.Status,
 		OccurredAt: t.OccurredAt, PostedAt: t.PostedAt, Timezone: t.Timezone, Notes: t.Notes, Location: t.Location,
 		Latitude: t.Latitude, Longitude: t.Longitude, Source: t.Source, ExternalRef: t.ExternalRef, TransferID: t.TransferID,
-		TransferDir: t.TransferDirection, RefundOf: t.RefundOf, Tags: t.Tags}
+		TransferDir: t.TransferDirection, RefundOf: t.RefundOf, Tags: t.Tags, CountedAmount: t.CountedAmount}
 	if in.AccountID != nil {
 		n.AccountID = ids.Normalize(*in.AccountID)
 	}
@@ -139,6 +139,9 @@ func (s *Service) Update(ctx context.Context, userID, key, id string, in UpdateI
 			return err
 		}
 		financial := in.financial(cur)
+		if financial && (cur.Source == "group" || cur.Source == "settlement") {
+			return apierr.Validation(map[string]string{"amount": "This transaction belongs to a group. Void it from the group and record it again."})
+		}
 		if cur.Type == "transfer" && financial {
 			return apierr.Validation(map[string]string{"amount": "A transfer's amount, accounts and date cannot be edited. Void it and record a new transfer."})
 		}

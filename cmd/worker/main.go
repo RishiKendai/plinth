@@ -10,11 +10,13 @@ import (
 	"syscall"
 	"time"
 
+	"plinth/server/internal/attachments"
 	"plinth/server/internal/auth"
 	"plinth/server/internal/platform/config"
 	"plinth/server/internal/platform/database"
 	"plinth/server/internal/platform/logging"
 	"plinth/server/internal/platform/security"
+	"plinth/server/internal/platform/storage"
 	"plinth/server/internal/recurrence"
 )
 
@@ -65,9 +67,27 @@ func run() error {
 		}
 		log.Info("occurrence generation done", "created", n)
 	}
+	var store storage.Store
+	if cfg.R2.Configured() {
+		if s3, err := storage.NewS3(cfg.R2.Endpoint, cfg.R2.Bucket, cfg.R2.AccessKeyID, cfg.R2.SecretAccessKey); err == nil {
+			store = s3
+		}
+	}
+	att := attachments.NewService(db, store)
+	cleanup := func() {
+		jctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		n, err := att.Cleanup(jctx, 100)
+		if err != nil {
+			log.Error("attachment cleanup failed", "err", err.Error())
+			return
+		}
+		log.Info("attachment cleanup done", "removed", n)
+	}
 	log.Info("worker started", "version", version)
 	purge()
 	generate()
+	cleanup()
 	tick := time.NewTicker(time.Hour)
 	defer tick.Stop()
 	for {
@@ -78,6 +98,7 @@ func run() error {
 		case <-tick.C:
 			purge()
 			generate()
+			cleanup()
 		}
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"plinth/server/internal/platform/database"
 	"plinth/server/internal/platform/logging"
 	"plinth/server/internal/platform/security"
+	"plinth/server/internal/platform/storage"
 )
 
 var version = "dev"
@@ -43,7 +44,17 @@ func run() error {
 	}
 	defer db.Close()
 
-	handler, _ := app.New(app.Deps{Config: cfg, DB: db, Log: log, Hasher: security.DefaultHasher()})
+	var store storage.Store
+	if cfg.R2.Configured() {
+		s3, err := storage.NewS3(cfg.R2.Endpoint, cfg.R2.Bucket, cfg.R2.AccessKeyID, cfg.R2.SecretAccessKey)
+		if err != nil {
+			return err
+		}
+		store = s3
+	} else {
+		log.Warn("R2 is not configured: attachments are disabled")
+	}
+	handler, _ := app.New(app.Deps{Config: cfg, DB: db, Log: log, Hasher: security.DefaultHasher(), Store: store})
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr, Handler: handler,
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,

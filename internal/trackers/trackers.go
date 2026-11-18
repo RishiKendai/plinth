@@ -92,7 +92,7 @@ func (s *Service) view(ctx context.Context, q dbx.Q, userID string, t Tracker) (
 		return View{}, err
 	}
 	rows, err := q.Query(ctx, `WITH e AS (
-			SELECT x.id, x.amount, (x.occurred_at AT TIME ZONE $3)::date AS d FROM tracker_transactions k JOIN transactions x ON x.id = k.transaction_id
+			SELECT x.id, COALESCE(x.counted_amount, x.amount) AS amount, (x.occurred_at AT TIME ZONE $3)::date AS d FROM tracker_transactions k JOIN transactions x ON x.id = k.transaction_id
 			WHERE k.tracker_id = $1 AND x.user_id = $2 AND x.type = 'expense' AND x.status IN ('pending','confirmed'))
 		SELECT to_char(d,'YYYY-MM-DD'), SUM(delta)::bigint, SUM(n)::int FROM (
 			SELECT d, amount AS delta, 1 AS n FROM e
@@ -322,7 +322,7 @@ func (s *Service) AddTransactions(ctx context.Context, userID, id string, txIDs 
 			return apierr.New(http.StatusConflict, "tracker_archived", "This tracker is archived. Restore it to add transactions.")
 		}
 		var ok int
-		if err := tx.QueryRow(ctx, `SELECT count(DISTINCT id) FROM transactions WHERE id = ANY($1::uuid[]) AND user_id=$2 AND type='expense' AND currency=$3 AND source <> 'reconcile'`,
+		if err := tx.QueryRow(ctx, `SELECT count(DISTINCT id) FROM transactions WHERE id = ANY($1::uuid[]) AND user_id=$2 AND type='expense' AND currency=$3 AND source NOT IN ('reconcile','settlement')`,
 			norm, userID, cur).Scan(&ok); err != nil {
 			return err
 		}
