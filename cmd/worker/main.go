@@ -1,4 +1,4 @@
-// Command worker runs background jobs. Phase 1 job: purge expired sessions.
+// Command worker runs background jobs: purge expired sessions (Phase 1) and generate recurring occurrences (Phase 3).
 // Jobs must be safe to retry (CLAUDE.md section 12).
 package main
 
@@ -15,6 +15,7 @@ import (
 	"plinth/server/internal/platform/database"
 	"plinth/server/internal/platform/logging"
 	"plinth/server/internal/platform/security"
+	"plinth/server/internal/recurrence"
 )
 
 var version = "dev"
@@ -52,8 +53,21 @@ func run() error {
 		}
 		log.Info("purge done", "sessions", s)
 	}
+	// Generation needs only the database: it creates expectations, never transactions.
+	rec := recurrence.NewService(db, nil, nil)
+	generate := func() {
+		jctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		n, err := rec.GenerateAll(jctx, 50)
+		if err != nil {
+			log.Error("occurrence generation failed", "err", err.Error(), "created_before_failure", n)
+			return
+		}
+		log.Info("occurrence generation done", "created", n)
+	}
 	log.Info("worker started", "version", version)
 	purge()
+	generate()
 	tick := time.NewTicker(time.Hour)
 	defer tick.Stop()
 	for {
@@ -63,6 +77,7 @@ func run() error {
 			return nil
 		case <-tick.C:
 			purge()
+			generate()
 		}
 	}
 }

@@ -166,3 +166,14 @@ func (h *Handler) revokeOthers(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.NoContent(w)
 }
+
+// UserID returns the authenticated user, or writes 401 and returns false. Handlers use it so ownership always
+// comes from the validated token and never from anything the client sent.
+func UserID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	p, ok := FromContext(r.Context())
+	if !ok {
+		httpx.Error(w, r, apierr.ErrUnauthorized)
+		return "", false
+	}
+	return p.UserID, true
+}

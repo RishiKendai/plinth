@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"plinth/server/internal/platform/apierr"
+	"plinth/server/internal/platform/ids"
 )
 
 // Success bodies are {"data": ...}. Error bodies are {"error": {code, message, fields?}}.
@@ -69,4 +70,15 @@ func JSONPage(w http.ResponseWriter, data any, next string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(pageEnvelope{Data: data, NextCursor: next})
+}
+
+// PathUUID reads a UUID path parameter. A malformed value is reported as 404, the same as an unknown one, so a
+// caller cannot tell the difference.
+func PathUUID(w http.ResponseWriter, r *http.Request, name string) (string, bool) {
+	id := ids.Normalize(r.PathValue(name))
+	if !ids.Valid(id) {
+		Error(w, r, apierr.ErrNotFound)
+		return "", false
+	}
+	return id, true
 }

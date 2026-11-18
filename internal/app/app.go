@@ -11,12 +11,16 @@ import (
 
 	"plinth/server/internal/accounts"
 	"plinth/server/internal/auth"
+	"plinth/server/internal/budgets"
 	"plinth/server/internal/categories"
 	"plinth/server/internal/platform/apierr"
 	"plinth/server/internal/platform/config"
 	"plinth/server/internal/platform/httpx"
 	"plinth/server/internal/platform/security"
+	"plinth/server/internal/recurrence"
+	"plinth/server/internal/reminders"
 	"plinth/server/internal/settings"
+	"plinth/server/internal/trackers"
 	"plinth/server/internal/transactions"
 	"plinth/server/internal/users"
 )
@@ -58,7 +62,12 @@ func New(d Deps) (http.Handler, *auth.Service) {
 	settings.NewHandler(settingsSvc).Register(mux, authSvc.Require)
 	accounts.NewHandler(accounts.NewService(d.DB, settingsSvc)).Register(mux, authSvc.Require)
 	categories.NewHandler(categories.NewService(d.DB)).Register(mux, authSvc.Require)
-	transactions.NewHandler(transactions.NewService(d.DB, settingsSvc)).Register(mux, authSvc.Require)
+	txSvc := transactions.NewService(d.DB, settingsSvc)
+	transactions.NewHandler(txSvc).Register(mux, authSvc.Require)
+	recurrence.NewHandler(recurrence.NewService(d.DB, settingsSvc, txSvc)).Register(mux, authSvc.Require)
+	reminders.NewHandler(reminders.NewService(d.DB, settingsSvc, txSvc)).Register(mux, authSvc.Require)
+	budgets.NewHandler(budgets.NewService(d.DB, settingsSvc)).Register(mux, authSvc.Require)
+	trackers.NewHandler(trackers.NewService(d.DB, settingsSvc, txSvc)).Register(mux, authSvc.Require)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, notFound)

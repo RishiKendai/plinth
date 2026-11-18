@@ -23,6 +23,7 @@ type ListParams struct {
 	Status        string
 	PaymentMethod string
 	Tag           string
+	TrackerID     string // only transactions added to this spending tracker
 	Q             string // text search over title, description, notes, names, tags, category and account
 	From, To      string // RFC 3339, or YYYY-MM-DD in the user's time zone (To is inclusive for a date)
 	MinAmount     *int64
@@ -105,7 +106,7 @@ func (s *Service) List(ctx context.Context, userID string, p ListParams) (Page, 
 	if p.PaymentMethod != "" && !paymentMethods[p.PaymentMethod] {
 		f["payment_method"] = "Choose a valid payment method."
 	}
-	for name, v := range map[string]string{"account_id": p.AccountID, "category_id": p.CategoryID} {
+	for name, v := range map[string]string{"account_id": p.AccountID, "category_id": p.CategoryID, "tracker_id": p.TrackerID} {
 		if v != "" && !ids.Valid(v) {
 			f[name] = "Not a valid identifier."
 		}
@@ -162,6 +163,9 @@ func (s *Service) List(ctx context.Context, userID string, p ListParams) (Page, 
 	}
 	if p.PaymentMethod != "" {
 		where = append(where, "t.payment_method = "+arg(p.PaymentMethod))
+	}
+	if p.TrackerID != "" {
+		where = append(where, "EXISTS (SELECT 1 FROM tracker_transactions k WHERE k.transaction_id = t.id AND k.tracker_id = "+arg(p.TrackerID)+")")
 	}
 	if p.Tag != "" {
 		where = append(where, "EXISTS (SELECT 1 FROM transaction_tags x JOIN tags g ON g.id = x.tag_id WHERE x.transaction_id = t.id AND lower(g.name) = lower("+arg(p.Tag)+"))")
