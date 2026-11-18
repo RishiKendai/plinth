@@ -46,7 +46,7 @@ func Start() (pool *pgxpool.Pool, stop func(), err error) {
 		stop = func() { _ = pg.Stop(); _ = os.RemoveAll(dir) }
 		url = fmt.Sprintf("postgres://plinth:plinth@127.0.0.1:%d/plinth?sslmode=disable", port)
 	}
-	pool, err = database.Open(ctx, url, 8, false)
+	pool, err = database.Open(ctx, url, 8, true) // same exec mode as production (Neon pooler)
 	if err != nil {
 		stop()
 		return nil, func() {}, err
@@ -93,6 +93,10 @@ func Reset(ctx context.Context, pool *pgxpool.Pool) error {
 func Truncate(t testing.TB, pool *pgxpool.Pool) {
 	t.Helper()
 	if _, err := pool.Exec(context.Background(), `TRUNCATE users, audit_events RESTART IDENTITY CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+	// The cascade also emptied the built-in categories.
+	if _, err := pool.Exec(context.Background(), `SELECT plinth_seed_categories()`); err != nil {
 		t.Fatal(err)
 	}
 }

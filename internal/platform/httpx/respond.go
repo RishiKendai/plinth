@@ -58,3 +58,15 @@ func Decode(r *http.Request, dst any) error {
 	}
 	return nil
 }
+
+type pageEnvelope struct {
+	Data       any    `json:"data"`
+	NextCursor string `json:"next_cursor,omitempty"`
+}
+
+// JSONPage writes a list with its cursor. next_cursor is omitted on the last page.
+func JSONPage(w http.ResponseWriter, data any, next string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(pageEnvelope{Data: data, NextCursor: next})
+}

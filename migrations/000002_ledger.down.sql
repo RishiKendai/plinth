@@ -1,0 +1,11 @@
+DROP TABLE IF EXISTS idempotency_keys;
+DROP TRIGGER IF EXISTS ledger_entries_no_change ON ledger_entries;
+DROP TABLE IF EXISTS ledger_entries;
+DROP FUNCTION IF EXISTS ledger_entries_immutable();
+DROP TABLE IF EXISTS transaction_tags;
+DROP TABLE IF EXISTS transactions;
+DROP TABLE IF EXISTS transfers;
+DROP TABLE IF EXISTS tags;
+DROP TABLE IF EXISTS categories;
+DROP FUNCTION IF EXISTS plinth_seed_categories();
+DROP TABLE IF EXISTS accounts;

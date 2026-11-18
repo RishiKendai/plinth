@@ -23,11 +23,11 @@ type PasswordVerifier interface {
 }
 
 type Profile struct {
-	ID            string     `json:"id"`
-	Email         string     `json:"email"`
-	DisplayName   string     `json:"display_name"`
-	CreatedAt     time.Time  `json:"created_at"`
-	DeletionAt    *time.Time `json:"deletion_requested_at,omitempty"`
+	ID          string     `json:"id"`
+	Email       string     `json:"email"`
+	DisplayName string     `json:"display_name"`
+	CreatedAt   time.Time  `json:"created_at"`
+	DeletionAt  *time.Time `json:"deletion_requested_at,omitempty"`
 }
 
 type Service struct {

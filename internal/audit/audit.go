@@ -21,10 +21,11 @@ func Log(ctx context.Context, db Execer, userID, event string, meta map[string]a
 	if err != nil {
 		return err
 	}
+	// Sent as text with an explicit cast: in pgx's pooler-safe Exec mode a []byte would be sent as bytea.
 	var uid any
 	if userID != "" {
 		uid = userID
 	}
-	_, err = db.Exec(ctx, `INSERT INTO audit_events (user_id, event, metadata) VALUES ($1, $2, $3)`, uid, event, b)
+	_, err = db.Exec(ctx, `INSERT INTO audit_events (user_id, event, metadata) VALUES ($1, $2, $3::jsonb)`, uid, event, string(b))
 	return err
 }
