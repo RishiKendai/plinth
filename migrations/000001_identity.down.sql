@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS audit_events;
+DROP TABLE IF EXISTS email_tokens;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS user_settings;
+DROP TABLE IF EXISTS users;
