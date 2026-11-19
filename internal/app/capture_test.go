@@ -120,14 +120,14 @@ func TestAttachmentUploadValidation(t *testing.T) { // exit criterion: upload va
 	if r := e.requestUpload(t, tok, tx, map[string]any{"size_bytes": 2 * 1024 * 1024, "filename": "../../etc/passwd.jpg"}); r.Status != 201 || str(r.data()["attachment"].(map[string]any), "filename") != "passwd.jpg" {
 		t.Fatalf("2 MB / path name: %d %s", r.Status, r.Raw)
 	}
-	// At most 10 per transaction (one pending already exists above).
-	for i := 0; i < 9; i++ {
+	// At most 3 proofs per transaction (one pending already exists above).
+	for i := 0; i < 2; i++ {
 		if r := e.requestUpload(t, tok, tx, nil); r.Status != 201 {
 			t.Fatalf("attachment %d: %d %s", i+2, r.Status, r.Raw)
 		}
 	}
 	if r := e.requestUpload(t, tok, tx, nil); r.Status != 409 || r.errCode() != "too_many_attachments" {
-		t.Fatalf("11th: %d %s", r.Status, r.Raw)
+		t.Fatalf("4th: %d %s", r.Status, r.Raw)
 	}
 	_ = uid
 }

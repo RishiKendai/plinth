@@ -29,7 +29,7 @@ import (
 
 const (
 	MaxSize        = 2 << 20 // 2 MB per file (CLAUDE.md 2.4)
-	maxPerEntity   = 10
+	maxPerEntity   = 3       // proofs per transaction (product limit)
 	uploadTTL      = 10 * time.Minute
 	downloadTTL    = 5 * time.Minute
 	abandonedAfter = time.Hour
