@@ -44,10 +44,12 @@ type Transaction struct {
 	ReplacedBy          *string    `json:"replaced_by"`
 	Tags                []string   `json:"tags"`
 	// CountedAmount is the part that counts as the user's own spending (budgets, trackers). Null means all of it.
-	CountedAmount *int64    `json:"counted_amount"`
-	Version       int       `json:"version"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	CountedAmount *int64 `json:"counted_amount"`
+	// HistoryOnly means no ledger entry exists: the transaction does not change the account balance (docs/balance-rules.md).
+	HistoryOnly bool      `json:"history_only"`
+	Version     int       `json:"version"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // Signed returns the effect on the account: negative leaves it.
@@ -120,6 +122,7 @@ type NewTx struct {
 	ReplacesID    *string
 	Tags          []string
 	CountedAmount *int64 // see Transaction.CountedAmount; internal modules only
+	HistoryOnly   bool   // record without touching the balance; see Transaction.HistoryOnly
 }
 
 func trim(s string) string { return strings.TrimSpace(s) }

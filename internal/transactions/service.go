@@ -36,14 +36,14 @@ const txCols = `t.id::text, t.account_id::text, t.type, t.amount, t.currency, t.
 	CASE WHEN t.transfer_id IS NULL THEN NULL ELSE (SELECT o.account_id::text FROM transactions o WHERE o.transfer_id = t.transfer_id AND o.id <> t.id LIMIT 1) END,
 	t.refund_of::text, t.replaces_id::text, (SELECT r.id::text FROM transactions r WHERE r.replaces_id = t.id LIMIT 1),
 	COALESCE((SELECT array_agg(tg.name ORDER BY lower(tg.name)) FROM transaction_tags tt JOIN tags tg ON tg.id = tt.tag_id WHERE tt.transaction_id = t.id), '{}'::text[]),
-	t.counted_amount, t.version, t.created_at, t.updated_at`
+	t.counted_amount, t.history_only, t.version, t.created_at, t.updated_at`
 
 func scanTx(row interface{ Scan(...any) error }) (Transaction, error) {
 	var t Transaction
 	err := row.Scan(&t.ID, &t.AccountID, &t.Type, &t.Amount, &t.Currency, &t.Title, &t.Description, &t.CategoryID,
 		&t.PaymentMethod, &t.PayerName, &t.PayeeName, &t.Status, &t.OccurredAt, &t.PostedAt, &t.Timezone, &t.Notes, &t.Location,
 		&t.Latitude, &t.Longitude, &t.Source, &t.ExternalRef, &t.TransferID, &t.TransferDirection, &t.CounterpartyAccount,
-		&t.RefundOf, &t.ReplacesID, &t.ReplacedBy, &t.Tags, &t.CountedAmount, &t.Version, &t.CreatedAt, &t.UpdatedAt)
+		&t.RefundOf, &t.ReplacesID, &t.ReplacedBy, &t.Tags, &t.CountedAmount, &t.HistoryOnly, &t.Version, &t.CreatedAt, &t.UpdatedAt)
 	t.OccurredAt = t.OccurredAt.UTC()
 	t.CreatedAt, t.UpdatedAt = t.CreatedAt.UTC(), t.UpdatedAt.UTC()
 	if t.PostedAt != nil {
@@ -108,7 +108,8 @@ func prepare(ctx context.Context, tx pgx.Tx, userID string, n *NewTx, excludeID 
 		} else {
 			var typ, cur, st string
 			var amt int64
-			err := tx.QueryRow(ctx, `SELECT type, currency, status, amount FROM transactions WHERE id=$1 AND user_id=$2 FOR UPDATE`, rid, userID).Scan(&typ, &cur, &st, &amt)
+			var parentHistoryOnly bool
+			err := tx.QueryRow(ctx, `SELECT type, currency, status, amount, history_only FROM transactions WHERE id=$1 AND user_id=$2 FOR UPDATE`, rid, userID).Scan(&typ, &cur, &st, &amt, &parentHistoryOnly)
 			switch {
 			case dbx.IsNoRows(err), err == nil && (typ != "expense" || !ledger.Counting(st)):
 				f["refund_of"] = "Choose a recorded expense to refund."
@@ -117,6 +118,7 @@ func prepare(ctx context.Context, tx pgx.Tx, userID string, n *NewTx, excludeID 
 			case cur != acct.Currency:
 				f["refund_of"] = "A refund must be in the same currency as the payment."
 			default:
+				n.HistoryOnly = parentHistoryOnly // a refund follows the payment it refunds: if that never touched the balance, neither does the refund
 				var refunded int64
 				if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0) FROM transactions WHERE refund_of=$1 AND status IN ('pending','confirmed') AND ($2::uuid IS NULL OR id <> $2::uuid)`,
 					rid, nullUUID(excludeID)).Scan(&refunded); err != nil {
@@ -151,11 +153,11 @@ func write(ctx context.Context, tx pgx.Tx, userID, currency string, n NewTx) err
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO transactions (id, user_id, account_id, type, amount, currency, title, description, category_id,
 		payment_method, payer_name, payee_name, status, occurred_at, posted_at, timezone, notes, location, latitude, longitude,
-		source, external_ref, transfer_id, transfer_direction, refund_of, replaces_id, counted_amount)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)`,
+		source, external_ref, transfer_id, transfer_direction, refund_of, replaces_id, counted_amount, history_only)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)`,
 		n.ID, userID, n.AccountID, n.Type, n.Amount, currency, n.Title, n.Description, n.CategoryID,
 		n.PaymentMethod, n.PayerName, n.PayeeName, n.Status, n.OccurredAt, posted, n.Timezone, n.Notes, n.Location, n.Latitude, n.Longitude,
-		n.Source, n.ExternalRef, n.TransferID, n.TransferDir, n.RefundOf, n.ReplacesID, n.CountedAmount)
+		n.Source, n.ExternalRef, n.TransferID, n.TransferDir, n.RefundOf, n.ReplacesID, n.CountedAmount, n.HistoryOnly)
 	if err != nil {
 		switch dbx.ConstraintName(err) {
 		case "transactions_source_event_key":
@@ -168,7 +170,7 @@ func write(ctx context.Context, tx pgx.Tx, userID, currency string, n NewTx) err
 	if err := setTags(ctx, tx, userID, n.ID, n.Tags); err != nil {
 		return err
 	}
-	if ledger.Counting(n.Status) {
+	if ledger.Counting(n.Status) && !n.HistoryOnly {
 		return ledger.Post(ctx, tx, userID, n.AccountID, n.ID, currency, signed(n.Type, n.TransferDir, n.Amount), n.OccurredAt, "movement")
 	}
 	return nil
@@ -238,6 +240,8 @@ type CreateInput struct {
 	ExternalRef   string     `json:"external_ref"`
 	RefundOf      *string    `json:"refund_of"`
 	Tags          []string   `json:"tags"`
+	// HistoryOnly records it without changing the balance (older transactions the balance already reflects).
+	HistoryOnly bool `json:"history_only"`
 }
 
 func (s *Service) userTimezone(ctx context.Context, userID string) (string, error) {
@@ -288,7 +292,7 @@ func (s *Service) Create(ctx context.Context, userID, key string, in CreateInput
 	n := NewTx{ID: id, AccountID: ids.Normalize(in.AccountID), Type: in.Type, Amount: in.Amount, Title: in.Title, Description: in.Description,
 		CategoryID: in.CategoryID, PaymentMethod: in.PaymentMethod, PayerName: in.PayerName, PayeeName: in.PayeeName, Status: status,
 		OccurredAt: occurred, Timezone: tz, Notes: in.Notes, Location: in.Location, Latitude: in.Latitude, Longitude: in.Longitude,
-		Source: source, ExternalRef: in.ExternalRef, RefundOf: in.RefundOf, Tags: in.Tags}
+		Source: source, ExternalRef: in.ExternalRef, RefundOf: in.RefundOf, Tags: in.Tags, HistoryOnly: in.HistoryOnly}
 	for k, v := range n.validate() {
 		f[k] = v
 	}
@@ -390,7 +394,7 @@ func applyStatus(ctx context.Context, tx pgx.Tx, userID string, l Transaction, t
 	switch {
 	case was && !will:
 		return ledger.Reverse(ctx, tx, userID, l.ID)
-	case !was && will:
+	case !was && will && !l.HistoryOnly:
 		return ledger.Post(ctx, tx, userID, l.AccountID, l.ID, l.Currency, l.Signed(), l.OccurredAt, "movement")
 	}
 	return nil

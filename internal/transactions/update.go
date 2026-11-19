@@ -49,7 +49,7 @@ func (in UpdateInput) merge(t Transaction) NewTx {
 		CategoryID: t.CategoryID, PaymentMethod: t.PaymentMethod, PayerName: t.PayerName, PayeeName: t.PayeeName, Status: t.Status,
 		OccurredAt: t.OccurredAt, PostedAt: t.PostedAt, Timezone: t.Timezone, Notes: t.Notes, Location: t.Location,
 		Latitude: t.Latitude, Longitude: t.Longitude, Source: t.Source, ExternalRef: t.ExternalRef, TransferID: t.TransferID,
-		TransferDir: t.TransferDirection, RefundOf: t.RefundOf, Tags: t.Tags, CountedAmount: t.CountedAmount}
+		TransferDir: t.TransferDirection, RefundOf: t.RefundOf, Tags: t.Tags, CountedAmount: t.CountedAmount, HistoryOnly: t.HistoryOnly}
 	if in.AccountID != nil {
 		n.AccountID = ids.Normalize(*in.AccountID)
 	}

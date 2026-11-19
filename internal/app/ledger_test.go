@@ -933,3 +933,69 @@ func TestClientGeneratedIDsAreStableAndSafe(t *testing.T) {
 		t.Fatalf("invalid ID: %d", r.Status)
 	}
 }
+
+func TestHistoryOnlyTransactionsNeverTouchTheBalance(t *testing.T) {
+	e := setup(t)
+	tok, _, _ := e.signUp(t, "asha@example.com")
+	a := e.newAccount(t, tok, "HDFC", "savings", 100000)
+	// An old expense the balance already reflects: record it for history only.
+	r := e.spend(t, tok, a, 25000, map[string]any{"title": "Old rent", "history_only": true, "occurred_at": "2026-09-05T10:00:00+05:30"})
+	if r.Status != 201 || r.data()["history_only"] != true {
+		t.Fatalf("create: %d %s", r.Status, r.Raw)
+	}
+	id := str(r.data(), "id")
+	if e.balance(t, tok, a) != 100000 {
+		t.Fatalf("a history-only expense must not move the balance: %d", e.balance(t, tok, a))
+	}
+	var entries int
+	_ = pool.QueryRow(context.Background(), `SELECT count(*) FROM ledger_entries WHERE transaction_id=$1`, id).Scan(&entries)
+	if entries != 0 {
+		t.Fatalf("no ledger entry expected, got %d", entries)
+	}
+	// It is still a real expense: in the list, and in spending analytics.
+	if got := e.do(t, "GET", "/v1/transactions?limit=10", tok, nil).Body["data"].([]any); len(got) != 1 {
+		t.Fatalf("listed: %d", len(got))
+	}
+	ov := e.do(t, "GET", "/v1/analytics/overview?from=2026-09-01&to=2026-09-30", tok, nil).data()["current"].(map[string]any)
+	if i64(ov, "expense") != 25000 {
+		t.Fatalf("analytics must include it: %v", ov)
+	}
+	// An ordinary expense next to it still moves the balance, and the ledger reconciles.
+	e.spend(t, tok, a, 1000, nil)
+	if e.balance(t, tok, a) != 99000 {
+		t.Fatalf("ordinary expense: %d", e.balance(t, tok, a))
+	}
+	// A refund follows the payment: also balance-neutral, even if the request does not say so.
+	rf := e.call(t, "POST", "/v1/transactions", tok, newKey(), map[string]any{"account_id": a, "type": "income", "amount": 5000, "title": "Refund", "refund_of": id})
+	if rf.Status != 201 || rf.data()["history_only"] != true || e.balance(t, tok, a) != 99000 {
+		t.Fatalf("refund of a history-only expense: %d %s balance %d", rf.Status, rf.Raw, e.balance(t, tok, a))
+	}
+	// Editing the amount (reverse and replace) and voiding both stay balance-neutral.
+	ed := e.call(t, "PUT", "/v1/transactions/"+id, tok, newKey(), map[string]any{"version": 1, "amount": 30000})
+	if ed.Status == 200 && ed.data()["history_only"] != true {
+		t.Fatalf("the replacement must stay history-only: %s", ed.Raw)
+	}
+	if e.balance(t, tok, a) != 99000 {
+		t.Fatalf("editing a history-only expense moved the balance: %d (%d %s)", e.balance(t, tok, a), ed.Status, ed.Raw)
+	}
+	for _, x := range e.do(t, "GET", "/v1/transactions?limit=20", tok, nil).Body["data"].([]any) {
+		m := x.(map[string]any)
+		if str(m, "title") == "Old rent" && str(m, "status") == "confirmed" {
+			if v := e.call(t, "POST", "/v1/transactions/"+str(m, "id")+"/void", tok, newKey(), nil); v.Status != 200 && v.Status != 409 {
+				t.Fatalf("void: %d %s", v.Status, v.Raw)
+			}
+		}
+	}
+	if e.balance(t, tok, a) != 99000 {
+		t.Fatalf("voiding a history-only expense moved the balance: %d", e.balance(t, tok, a))
+	}
+	// Review flow: needs_review then confirm does not post either.
+	nr := e.spend(t, tok, a, 7000, map[string]any{"history_only": true, "status": "needs_review"})
+	if c := e.call(t, "POST", "/v1/transactions/"+str(nr.data(), "id")+"/status", tok, newKey(), map[string]any{"status": "confirmed"}); c.Status != 200 {
+		t.Fatalf("confirm: %d %s", c.Status, c.Raw)
+	}
+	if e.balance(t, tok, a) != 99000 {
+		t.Fatalf("confirming a history-only transaction moved the balance: %d", e.balance(t, tok, a))
+	}
+	assertLedger(t)
+}
