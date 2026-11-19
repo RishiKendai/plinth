@@ -54,6 +54,7 @@ type Group struct {
 	ArchivedAt  *time.Time `json:"archived_at"`
 	Version     int        `json:"version"`
 	Kind        string     `json:"kind"`         // group | split
+	Purpose     string     `json:"purpose"`      // budget | tracker, fixed at creation
 	BudgetLimit *int64     `json:"budget_limit"` // monthly limit on the group's total spending, or null
 	MonthSpent  int64      `json:"month_spent"`  // what the group spent this (UTC) month
 	CreatedAt   time.Time  `json:"created_at"`
@@ -176,6 +177,9 @@ type CreateInput struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Currency string `json:"currency"`
+	// Purpose is chosen once and never changes: "budget" (needs a monthly BudgetLimit) or "tracker" (no limit). Empty means tracker.
+	Purpose     string `json:"purpose"`
+	BudgetLimit *int64 `json:"budget_limit"`
 }
 
 func (s *Service) Create(ctx context.Context, userID, key string, in CreateInput) (Group, error) {
@@ -196,6 +200,18 @@ func (s *Service) Create(ctx context.Context, userID, key string, in CreateInput
 	}
 	if _, ok := money.Lookup(in.Currency); !ok {
 		f["currency"] = "Choose a supported currency."
+	}
+	purpose := in.Purpose
+	if purpose == "" {
+		purpose = "tracker"
+	}
+	switch {
+	case purpose != "budget" && purpose != "tracker":
+		f["purpose"] = "Choose budget or spending tracker."
+	case purpose == "budget" && (in.BudgetLimit == nil || *in.BudgetLimit <= 0 || *in.BudgetLimit > 1_000_000_000_000_000):
+		f["budget_limit"] = "A budget needs a monthly limit greater than zero."
+	case purpose == "tracker" && in.BudgetLimit != nil:
+		f["budget_limit"] = "A spending tracker has no limit."
 	}
 	id := ids.Normalize(in.ID)
 	if in.ID != "" && !ids.Valid(id) {
@@ -224,7 +240,7 @@ func (s *Service) Create(ctx context.Context, userID, key string, in CreateInput
 		if strings.TrimSpace(display) == "" {
 			display = strings.Split(email, "@")[0]
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO groups (id, name, currency, created_by) VALUES ($1,$2,$3,$4)`, id, name, in.Currency, userID); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO groups (id, name, currency, created_by, purpose, budget_limit) VALUES ($1,$2,$3,$4,$5,$6)`, id, name, in.Currency, userID, purpose, in.BudgetLimit); err != nil {
 			if dbx.ConstraintName(err) == "groups_pkey" {
 				return transactions.ErrIDTaken
 			}
@@ -256,9 +272,9 @@ func clip(s string, n int) string {
 func (s *Service) get(ctx context.Context, q dbx.Q, userID, id string) (Group, error) {
 	var g Group
 	err := q.QueryRow(ctx, `SELECT g.id::text, g.name, g.currency, m.id::text, m.role, (SELECT count(*) FROM group_members x WHERE x.group_id=g.id AND x.removed_at IS NULL),
-		g.archived_at, g.version, g.created_at, g.kind, g.budget_limit,
+		g.archived_at, g.version, g.created_at, g.kind, g.budget_limit, g.purpose,
 		COALESCE((SELECT SUM(e.amount) FROM group_expenses e WHERE e.group_id=g.id AND e.voided_at IS NULL AND e.occurred_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'),0)::bigint FROM groups g JOIN group_members m ON m.group_id=g.id AND m.user_id=$2 AND m.removed_at IS NULL WHERE g.id=$1`, id, userID).
-		Scan(&g.ID, &g.Name, &g.Currency, &g.MyMemberID, &g.MyRole, &g.MemberCount, &g.ArchivedAt, &g.Version, &g.CreatedAt, &g.Kind, &g.BudgetLimit, &g.MonthSpent)
+		Scan(&g.ID, &g.Name, &g.Currency, &g.MyMemberID, &g.MyRole, &g.MemberCount, &g.ArchivedAt, &g.Version, &g.CreatedAt, &g.Kind, &g.BudgetLimit, &g.Purpose, &g.MonthSpent)
 	if dbx.IsNoRows(err) {
 		return g, apierr.ErrNotFound
 	}
@@ -291,7 +307,7 @@ func (s *Service) ListSplits(ctx context.Context, userID string) ([]Group, error
 
 func (s *Service) list(ctx context.Context, userID, kind string) ([]Group, error) {
 	rows, err := s.db.Query(ctx, `SELECT g.id::text FROM groups g JOIN group_members m ON m.group_id=g.id AND m.user_id=$1 AND m.removed_at IS NULL
-		WHERE g.kind = '`+kind+`' ORDER BY g.archived_at IS NOT NULL, g.created_at DESC, g.id`, userID)
+		WHERE g.kind = '`+kind+`' ORDER BY g.archived_at IS NOT NULL, GREATEST(g.created_at, COALESCE((SELECT max(e.created_at) FROM group_expenses e WHERE e.group_id=g.id), g.created_at)) DESC, g.id`, userID)
 	if err != nil {
 		return nil, err
 	}

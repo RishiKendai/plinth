@@ -175,13 +175,20 @@ func (s *Service) ShareOf(ctx context.Context, userID, txID string) (*ShareInfo,
 	return &si, nil
 }
 
-// SetBudget sets or clears the group's monthly limit on total spending. Admin only. The limit never blocks anything: it is only shown.
+// SetBudget changes the monthly limit of a budget group (the limit can change; what the group is for cannot). Admin only. The limit never blocks anything: it is only shown.
 func (s *Service) SetBudget(ctx context.Context, userID, groupID string, limit *int64) (Group, error) {
-	if limit != nil && (*limit <= 0 || *limit > 1_000_000_000_000_000) {
-		return Group{}, apierr.Validation(map[string]string{"limit": "Enter a limit greater than zero, or clear it."})
+	if limit == nil || *limit <= 0 || *limit > 1_000_000_000_000_000 {
+		return Group{}, apierr.Validation(map[string]string{"limit": "Enter a limit greater than zero. A budget always has one."})
 	}
 	if _, err := admin(ctx, s.db, userID, groupID); err != nil {
 		return Group{}, err
+	}
+	var purpose string
+	if err := s.db.QueryRow(ctx, `SELECT purpose FROM groups WHERE id=$1`, groupID).Scan(&purpose); err != nil {
+		return Group{}, err
+	}
+	if purpose != "budget" {
+		return Group{}, apierr.New(http.StatusConflict, "not_a_budget", "This group is a spending tracker, so it has no limit. What a group is for is chosen when it is created and cannot change.")
 	}
 	if _, err := s.db.Exec(ctx, `UPDATE groups SET budget_limit=$2, version=version+1 WHERE id=$1`, groupID, limit); err != nil {
 		return Group{}, err

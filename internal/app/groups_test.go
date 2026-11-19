@@ -610,33 +610,62 @@ func TestSplitsAreGroupsOfKindSplit(t *testing.T) {
 	assertLedger(t)
 }
 
-func TestGroupBudgetIsAMonthlyLimitOnGroupSpending(t *testing.T) {
+func TestEveryGroupIsABudgetOrASpendingTrackerChosenAtCreation(t *testing.T) {
 	e := setup(t)
 	ta, _, _ := e.signUp(t, "asha@example.com")
 	tb, _, _ := e.signUp(t, "ravi@example.com")
-	gid, me := e.newGroup(t, ta, "Flat")
-	b := e.addPerson(t, ta, gid, "Ben")
-	e.groupExpense(t, ta, gid, map[string]any{"title": "Rent", "amount": 40000, "split_method": "equal", "participants": parts(me, 0, b, 0)})
-	g := e.call(t, "PUT", "/v1/groups/"+gid+"/budget", ta, "", map[string]any{"limit": 100000})
-	if g.Status != 200 || i64(g.data(), "budget_limit") != 100000 || i64(g.data(), "month_spent") != 40000 {
-		t.Fatalf("set: %d %s", g.Status, g.Raw)
-	}
-	for _, bad := range []int{0, -5} {
-		if r := e.call(t, "PUT", "/v1/groups/"+gid+"/budget", ta, "", map[string]any{"limit": bad}); r.Status != 422 {
-			t.Errorf("limit %d: %d", bad, r.Status)
+	mk := func(body map[string]any) resp { return e.call(t, "POST", "/v1/groups", ta, newKey(), body) }
+	// Validation: a budget needs a limit, a tracker has none, and the purpose must be one of the two.
+	for name, body := range map[string]map[string]any{
+		"budget without limit": {"name": "B", "purpose": "budget"},
+		"budget with zero":     {"name": "B", "purpose": "budget", "budget_limit": 0},
+		"tracker with a limit": {"name": "T", "purpose": "tracker", "budget_limit": 5000},
+		"unknown purpose":      {"name": "X", "purpose": "savings"},
+	} {
+		if r := mk(body); r.Status != 422 {
+			t.Errorf("%s: want 422 got %d %s", name, r.Status, r.Raw)
 		}
 	}
-	// Going over never blocks spending; it is only shown.
-	if r := e.groupExpense(t, ta, gid, map[string]any{"title": "More", "amount": 90000, "split_method": "equal", "participants": parts(me, 0, b, 0)}); r.Status != 201 {
+	tr := mk(map[string]any{"name": "Trip", "purpose": "tracker"})
+	if tr.Status != 201 || str(tr.data(), "purpose") != "tracker" || tr.data()["budget_limit"] != nil {
+		t.Fatalf("tracker: %d %s", tr.Status, tr.Raw)
+	}
+	if def := mk(map[string]any{"name": "Old client"}); str(def.data(), "purpose") != "tracker" {
+		t.Fatalf("a client that sends no purpose gets a tracker: %s", def.Raw)
+	}
+	bd := mk(map[string]any{"name": "Flat", "purpose": "budget", "budget_limit": 100000})
+	if bd.Status != 201 || str(bd.data(), "purpose") != "budget" || i64(bd.data(), "budget_limit") != 100000 {
+		t.Fatalf("budget: %d %s", bd.Status, bd.Raw)
+	}
+	gid, me := str(bd.data(), "id"), str(bd.data(), "my_member_id")
+	b := e.addPerson(t, ta, gid, "Ben")
+	e.groupExpense(t, ta, gid, map[string]any{"title": "Rent", "amount": 40000, "split_method": "equal", "participants": parts(me, 0, b, 0)})
+	if v := e.do(t, "GET", "/v1/groups/"+gid, ta, nil).data(); i64(v, "month_spent") != 40000 {
+		t.Fatalf("month spent: %v", v)
+	}
+	// The limit of a budget can change but never be removed; going over never blocks spending.
+	if c := e.call(t, "PUT", "/v1/groups/"+gid+"/budget", ta, "", map[string]any{"limit": 200000}); c.Status != 200 || i64(c.data(), "budget_limit") != 200000 {
+		t.Fatalf("change: %d %s", c.Status, c.Raw)
+	}
+	for _, bad := range []any{0, -5, nil} {
+		if r := e.call(t, "PUT", "/v1/groups/"+gid+"/budget", ta, "", map[string]any{"limit": bad}); r.Status != 422 {
+			t.Errorf("limit %v: %d", bad, r.Status)
+		}
+	}
+	if r := e.groupExpense(t, ta, gid, map[string]any{"title": "More", "amount": 900000, "split_method": "equal", "participants": parts(me, 0, b, 0)}); r.Status != 201 {
 		t.Fatalf("over the limit must still save: %d", r.Status)
 	}
-	if v := e.do(t, "GET", "/v1/groups/"+gid, ta, nil).data(); i64(v, "month_spent") != 130000 {
-		t.Fatalf("month spent: %v", v)
+	// A tracker has no limit to set, and nobody can turn a tracker into a budget or the reverse.
+	if r := e.call(t, "PUT", "/v1/groups/"+str(tr.data(), "id")+"/budget", ta, "", map[string]any{"limit": 100}); r.Status != 409 || r.errCode() != "not_a_budget" {
+		t.Fatalf("limit on a tracker: %d %s", r.Status, r.Raw)
+	}
+	if _, err := pool.Exec(t.Context(), `UPDATE groups SET purpose='tracker' WHERE id=$1`, gid); err == nil {
+		t.Fatal("the database must refuse to change a group's purpose")
+	}
+	if _, err := pool.Exec(t.Context(), `UPDATE groups SET budget_limit=NULL WHERE id=$1`, gid); err == nil {
+		t.Fatal("a budget can never lose its limit")
 	}
 	if r := e.call(t, "PUT", "/v1/groups/"+gid+"/budget", tb, "", map[string]any{"limit": 1}); r.Status != 404 {
 		t.Fatalf("outsider: %d", r.Status)
-	}
-	if c := e.call(t, "PUT", "/v1/groups/"+gid+"/budget", ta, "", map[string]any{"limit": nil}); c.Status != 200 || c.data()["budget_limit"] != nil {
-		t.Fatalf("clear: %d %s", c.Status, c.Raw)
 	}
 }
