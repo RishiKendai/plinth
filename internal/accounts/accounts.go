@@ -4,6 +4,7 @@ package accounts
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"strings"
 	"time"
@@ -429,4 +430,51 @@ func Fetch(ctx context.Context, q dbx.Q, userID, id string) (Account, error) {
 func MarkReconciled(ctx context.Context, q dbx.Q, userID, id string, balance int64, at time.Time) error {
 	_, err := q.Exec(ctx, `UPDATE accounts SET reconciled_at=$3, reconciled_balance=$4, updated_at=now() WHERE id=$1 AND user_id=$2`, id, userID, at, balance)
 	return err
+}
+
+// Changes returns accounts changed after the cursor for incremental sync (see transactions.Changes). Archived accounts are
+// included: archiving is an update, never a delete.
+func (s *Service) Changes(ctx context.Context, userID, cur string, limit int, settle time.Duration) ([]Account, string, bool, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	var ts, id any
+	if cur != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(cur)
+		parts := strings.SplitN(string(raw), "|", 2)
+		if err != nil || len(parts) != 2 || !ids.Valid(parts[1]) {
+			return nil, "", false, apierr.New(400, "bad_cursor", "That page marker is not valid. Start again from the first page.")
+		}
+		t, perr := time.Parse(time.RFC3339Nano, parts[0])
+		if perr != nil {
+			return nil, "", false, apierr.New(400, "bad_cursor", "That page marker is not valid. Start again from the first page.")
+		}
+		ts, id = t, parts[1]
+	}
+	rows, err := s.db.Query(ctx, `SELECT `+cols+` FROM accounts a WHERE a.user_id=$1 AND ($2::timestamptz IS NULL OR (a.updated_at, a.id) > ($2::timestamptz, $3::uuid))
+		AND a.updated_at < now() - $5::interval ORDER BY a.updated_at, a.id LIMIT $4`, userID, ts, id, limit+1, settle.String())
+	if err != nil {
+		return nil, "", false, err
+	}
+	defer rows.Close()
+	out := []Account{}
+	for rows.Next() {
+		a, err := scan(rows)
+		if err != nil {
+			return nil, "", false, err
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", false, err
+	}
+	more := false
+	if len(out) > limit {
+		out, more = out[:limit], true
+	}
+	next := cur
+	if n := len(out); n > 0 {
+		next = base64.RawURLEncoding.EncodeToString([]byte(out[n-1].UpdatedAt.UTC().Format(time.RFC3339Nano) + "|" + out[n-1].ID))
+	}
+	return out, next, more, nil
 }

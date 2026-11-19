@@ -21,6 +21,7 @@ func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.H
 	mux.Handle("POST /v1/groups/{id}/archive", r(h.archive(true)))
 	mux.Handle("POST /v1/groups/{id}/unarchive", r(h.archive(false)))
 	mux.Handle("GET /v1/groups/{id}/balances", r(h.balances))
+	mux.Handle("GET /v1/groups/{id}/analytics", r(h.analytics))
 	mux.Handle("POST /v1/groups/{id}/members", r(h.addMember))
 	mux.Handle("DELETE /v1/groups/{id}/members/{mid}", r(h.removeMember))
 	mux.Handle("PUT /v1/groups/{id}/members/{mid}/role", r(h.setRole))
@@ -414,4 +415,21 @@ func (h *Handler) preview(w http.ResponseWriter, rq *http.Request) {
 		out[i] = ShareView{MemberID: s.Member, Amount: s.Amount, Input: s.Input}
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"shares": out})
+}
+
+func (h *Handler) analytics(w http.ResponseWriter, rq *http.Request) {
+	uid, ok := auth.UserID(w, rq)
+	if !ok {
+		return
+	}
+	id, ok := httpx.PathUUID(w, rq, "id")
+	if !ok {
+		return
+	}
+	a, err := h.svc.Analytics(rq.Context(), uid, id)
+	if err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, a)
 }

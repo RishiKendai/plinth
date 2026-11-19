@@ -10,11 +10,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plinth/server/internal/accounts"
+	"plinth/server/internal/analytics"
 	"plinth/server/internal/attachments"
 	"plinth/server/internal/auth"
 	"plinth/server/internal/bankmsg"
 	"plinth/server/internal/budgets"
 	"plinth/server/internal/categories"
+	"plinth/server/internal/gate"
 	"plinth/server/internal/groups"
 	"plinth/server/internal/imports"
 	"plinth/server/internal/platform/apierr"
@@ -25,6 +27,7 @@ import (
 	"plinth/server/internal/recurrence"
 	"plinth/server/internal/reminders"
 	"plinth/server/internal/settings"
+	"plinth/server/internal/syncapi"
 	"plinth/server/internal/trackers"
 	"plinth/server/internal/transactions"
 	"plinth/server/internal/upi"
@@ -68,13 +71,15 @@ func New(d Deps) (http.Handler, *auth.Service) {
 	users.NewHandler(users.NewService(d.DB, authSvc)).Register(mux, authSvc.Require, limit)
 	settingsSvc := settings.NewService(d.DB)
 	settings.NewHandler(settingsSvc).Register(mux, authSvc.Require)
-	accounts.NewHandler(accounts.NewService(d.DB, settingsSvc)).Register(mux, authSvc.Require)
+	accSvc := accounts.NewService(d.DB, settingsSvc)
+	accounts.NewHandler(accSvc).Register(mux, authSvc.Require)
 	categories.NewHandler(categories.NewService(d.DB)).Register(mux, authSvc.Require)
 	txSvc := transactions.NewService(d.DB, settingsSvc)
 	transactions.NewHandler(txSvc).Register(mux, authSvc.Require)
 	recurrence.NewHandler(recurrence.NewService(d.DB, settingsSvc, txSvc)).Register(mux, authSvc.Require)
 	reminders.NewHandler(reminders.NewService(d.DB, settingsSvc, txSvc)).Register(mux, authSvc.Require)
 	budgets.NewHandler(budgets.NewService(d.DB, settingsSvc)).Register(mux, authSvc.Require)
+	analytics.NewHandler(analytics.NewService(d.DB, settingsSvc), d.Log).Register(mux, authSvc.Require)
 	trackers.NewHandler(trackers.NewService(d.DB, settingsSvc, txSvc)).Register(mux, authSvc.Require)
 
 	// Phase 4: capture and automation.
@@ -89,6 +94,11 @@ func New(d Deps) (http.Handler, *auth.Service) {
 	// Phase 5: groups, splits and settlements.
 	groups.NewHandler(groups.NewService(d.DB, settingsSvc, txSvc)).Register(mux, authSvc.Require, limit)
 
+	// Phase 7: incremental sync and service status.
+	syncapi.NewHandler(accSvc, txSvc).Register(mux, authSvc.Require)
+	gcfg := gate.Config{Maintenance: d.Config.MaintenanceMode, MinClientVersion: d.Config.MinClientVersion, ServerVersion: "0.1.0"}
+	mux.HandleFunc("GET /v1/meta", gate.Meta(gcfg))
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, notFound)
 	})
@@ -99,6 +109,7 @@ func New(d Deps) (http.Handler, *auth.Service) {
 		httpx.AccessLog(d.Log),
 		httpx.SecurityHeaders(d.Config.IsProduction()),
 		sizeLimit(d.Config.RequestTimeout),
+		gate.Middleware(gcfg),
 	), authSvc
 }
 

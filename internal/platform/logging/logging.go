@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-var sensitive = []string{"password", "token", "authorization", "secret", "cookie", "pepper", "code", "otp", "pin", "dsn", "database_url"}
+var sensitive = []string{"password", "token", "authorization", "secret", "cookie", "pepper", "code", "otp", "pin", "dsn", "database_url", "url", "presign", "sms", "content", "fingerprint"}
 
 const Redacted = "[REDACTED]"
 

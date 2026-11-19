@@ -261,3 +261,56 @@ func (s *Service) List(ctx context.Context, userID string, p ListParams) (Page, 
 	}
 	return page, nil
 }
+
+// SyncSettle is how far behind "now" a sync pull stops. updated_at is the transaction's start time, so a long-running
+// write could commit after a later row was already pulled; holding the cursor back by more than the longest request
+// (REQUEST_TIMEOUT, 15 s by default) means no row can appear behind the cursor. Docs: docs/sync.md.
+var SyncSettle = 30 * time.Second // a var only so tests can shorten it
+
+// Changes returns transactions changed after the cursor, oldest first, for incremental sync. Rows are never deleted (a
+// void is a status change), so "changed since" is complete. hasMore tells the caller to ask again immediately.
+func (s *Service) Changes(ctx context.Context, userID, cur string, limit int) (items []Transaction, next string, hasMore bool, err error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	var kv, id any
+	if cur != "" {
+		c, derr := decodeCursor(cur)
+		if derr != nil {
+			return nil, "", false, derr
+		}
+		t, perr := time.Parse(time.RFC3339Nano, c.K)
+		if perr != nil {
+			return nil, "", false, errBadCursor
+		}
+		kv, id = t, c.ID
+	}
+	rows, err := s.db.Query(ctx, `SELECT `+txCols+` FROM transactions t
+		WHERE t.user_id = $1 AND ($2::timestamptz IS NULL OR (t.updated_at, t.id) > ($2::timestamptz, $3::uuid)) AND t.updated_at < now() - $5::interval
+		ORDER BY t.updated_at, t.id LIMIT $4`, userID, kv, id, limit+1, SyncSettle.String())
+	if err != nil {
+		return nil, "", false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		t, err := scanTx(rows)
+		if err != nil {
+			return nil, "", false, err
+		}
+		items = append(items, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", false, err
+	}
+	if len(items) > limit {
+		items, hasMore = items[:limit], true
+	}
+	if items == nil {
+		items = []Transaction{}
+	}
+	next = cur
+	if n := len(items); n > 0 {
+		next = encodeCursor(cursor{K: items[n-1].UpdatedAt.Format(time.RFC3339Nano), ID: items[n-1].ID})
+	}
+	return items, next, hasMore, nil
+}

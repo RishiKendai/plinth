@@ -45,11 +45,16 @@ type env struct {
 func setup(t *testing.T) *env { return setupWith(t, true) }
 
 // setupWith builds the app. withStorage=false leaves object storage unconfigured, as on a server without R2.
-func setupWith(t *testing.T, withStorage bool) *env {
+func setupWith(t *testing.T, withStorage bool) *env { return setupConfigured(t, withStorage, nil) }
+
+func setupConfigured(t *testing.T, withStorage bool, mod func(*config.Config)) *env {
 	t.Helper()
 	testdb.Truncate(t, pool)
 	cfg := config.Config{Env: "development", TokenPepper: []byte(strings.Repeat("p", 32)),
 		AccessTokenTTL: 15 * time.Minute, RefreshTokenTTL: time.Hour, RequestTimeout: 10 * time.Second}
+	if mod != nil {
+		mod(&cfg)
+	}
 	var mem *storage.Memory
 	deps := app.Deps{Config: cfg, DB: pool, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Hasher: security.Hasher{Time: 1, MemoryKiB: 64, Threads: 1}}

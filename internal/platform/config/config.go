@@ -15,13 +15,16 @@ import (
 const placeholder = "CHANGE_ME"
 
 type Config struct {
-	Env         string // "development" or "production"
-	HTTPAddr    string
-	LogLevel    string
-	TrustProxy  bool
-	DatabaseURL string
-	DBMaxConns  int32
-	DBUsePooler bool
+	Env        string // "development" or "production"
+	HTTPAddr   string
+	LogLevel   string
+	TrustProxy bool
+	// MaintenanceMode makes every /v1 route answer 503 maintenance. MinClientVersion refuses older app builds with 426.
+	MaintenanceMode  bool
+	MinClientVersion string
+	DatabaseURL      string
+	DBMaxConns       int32
+	DBUsePooler      bool
 
 	TokenPepper     []byte
 	AccessTokenTTL  time.Duration
@@ -48,17 +51,19 @@ func isPlaceholder(v string) bool { return v == "" || strings.Contains(v, placeh
 func Load() (Config, error) {
 	LoadDotEnv()
 	c := Config{
-		Env:             str("APP_ENV", "development"),
-		HTTPAddr:        str("HTTP_ADDR", ":8080"),
-		LogLevel:        str("LOG_LEVEL", "info"),
-		TrustProxy:      boolean("TRUST_PROXY", false),
-		DatabaseURL:     str("DATABASE_URL", ""),
-		DBMaxConns:      int32(integer("DB_MAX_CONNS", 10)),
-		DBUsePooler:     boolean("DB_USE_POOLER", true),
-		TokenPepper:     []byte(str("TOKEN_PEPPER", "")),
-		AccessTokenTTL:  duration("ACCESS_TOKEN_TTL", 15*time.Minute),
-		RefreshTokenTTL: duration("REFRESH_TOKEN_TTL", 720*time.Hour),
-		RequestTimeout:  duration("REQUEST_TIMEOUT", 15*time.Second),
+		Env:              str("APP_ENV", "development"),
+		HTTPAddr:         str("HTTP_ADDR", ":8080"),
+		LogLevel:         str("LOG_LEVEL", "info"),
+		TrustProxy:       boolean("TRUST_PROXY", false),
+		MaintenanceMode:  boolean("MAINTENANCE_MODE", false),
+		MinClientVersion: os.Getenv("MIN_CLIENT_VERSION"),
+		DatabaseURL:      str("DATABASE_URL", ""),
+		DBMaxConns:       int32(integer("DB_MAX_CONNS", 10)),
+		DBUsePooler:      boolean("DB_USE_POOLER", true),
+		TokenPepper:      []byte(str("TOKEN_PEPPER", "")),
+		AccessTokenTTL:   duration("ACCESS_TOKEN_TTL", 15*time.Minute),
+		RefreshTokenTTL:  duration("REFRESH_TOKEN_TTL", 720*time.Hour),
+		RequestTimeout:   duration("REQUEST_TIMEOUT", 15*time.Second),
 		R2: R2{
 			AccountID: str("R2_ACCOUNT_ID", ""), AccessKeyID: str("R2_ACCESS_KEY_ID", ""),
 			SecretAccessKey: str("R2_SECRET_ACCESS_KEY", ""), Bucket: str("R2_BUCKET", ""),

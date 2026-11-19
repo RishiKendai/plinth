@@ -1,6 +1,6 @@
 module plinth/server
 
-go 1.26.0
+go 1.26.11
 
 require (
 	github.com/fergusstrange/embedded-postgres v1.34.0
@@ -12,7 +12,7 @@ require (
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/puddle/v2 v2.2.3 // indirect
+	github.com/jackc/puddle/v2 v2.2.4 // indirect
 	github.com/lib/pq v1.10.9 // indirect
 	github.com/xi2/xz v0.0.0-20171230120015-48954b6210f8 // indirect
 	golang.org/x/sync v0.25.0 // indirect

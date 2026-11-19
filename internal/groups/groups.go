@@ -1043,3 +1043,48 @@ func (s *Service) VoidSettlement(ctx context.Context, userID, id string) (Settle
 	})
 	return out, err
 }
+
+// MonthTotal is what the group spent in one calendar month (UTC month of the expense date).
+type MonthTotal struct {
+	Month  string `json:"month"`
+	Amount int64  `json:"amount"`
+	Count  int    `json:"count"`
+}
+
+// GroupAnalytics: totals, each member's contribution (what they paid) and obligation (their share), what is still outstanding,
+// and spending by month. Only group records are used; no member's personal transactions are read.
+type GroupAnalytics struct {
+	Currency      string       `json:"currency"`
+	TotalExpenses int64        `json:"total_expenses"`
+	TotalSettled  int64        `json:"total_settled"`
+	Outstanding   int64        `json:"outstanding"` // what is still to be repaid, in total
+	ExpenseCount  int          `json:"expense_count"`
+	Members       []Member     `json:"members"`
+	Months        []MonthTotal `json:"months"`
+}
+
+func (s *Service) Analytics(ctx context.Context, userID, groupID string) (GroupAnalytics, error) {
+	b, err := s.balances(ctx, s.db, userID, groupID)
+	if err != nil {
+		return GroupAnalytics{}, err
+	}
+	out := GroupAnalytics{Currency: b.Currency, TotalExpenses: b.TotalExpenses, TotalSettled: b.TotalSettled, Members: b.Members, Months: []MonthTotal{}}
+	for _, p := range b.Payments {
+		out.Outstanding += p.Amount
+	}
+	rows, err := s.db.Query(ctx, `SELECT to_char(date_trunc('month', occurred_at AT TIME ZONE 'UTC'),'YYYY-MM'), SUM(amount)::bigint, count(*)::int
+		FROM group_expenses WHERE group_id=$1 AND voided_at IS NULL GROUP BY 1 ORDER BY 1`, groupID)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var m MonthTotal
+		if err := rows.Scan(&m.Month, &m.Amount, &m.Count); err != nil {
+			return out, err
+		}
+		out.ExpenseCount += m.Count
+		out.Months = append(out.Months, m)
+	}
+	return out, rows.Err()
+}
