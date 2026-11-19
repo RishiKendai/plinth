@@ -53,6 +53,9 @@ type Group struct {
 	MyNet       int64      `json:"my_net"` // positive: the group owes you
 	ArchivedAt  *time.Time `json:"archived_at"`
 	Version     int        `json:"version"`
+	Kind        string     `json:"kind"`         // group | split
+	BudgetLimit *int64     `json:"budget_limit"` // monthly limit on the group's total spending, or null
+	MonthSpent  int64      `json:"month_spent"`  // what the group spent this (UTC) month
 	CreatedAt   time.Time  `json:"created_at"`
 }
 
@@ -253,8 +256,9 @@ func clip(s string, n int) string {
 func (s *Service) get(ctx context.Context, q dbx.Q, userID, id string) (Group, error) {
 	var g Group
 	err := q.QueryRow(ctx, `SELECT g.id::text, g.name, g.currency, m.id::text, m.role, (SELECT count(*) FROM group_members x WHERE x.group_id=g.id AND x.removed_at IS NULL),
-		g.archived_at, g.version, g.created_at FROM groups g JOIN group_members m ON m.group_id=g.id AND m.user_id=$2 AND m.removed_at IS NULL WHERE g.id=$1`, id, userID).
-		Scan(&g.ID, &g.Name, &g.Currency, &g.MyMemberID, &g.MyRole, &g.MemberCount, &g.ArchivedAt, &g.Version, &g.CreatedAt)
+		g.archived_at, g.version, g.created_at, g.kind, g.budget_limit,
+		COALESCE((SELECT SUM(e.amount) FROM group_expenses e WHERE e.group_id=g.id AND e.voided_at IS NULL AND e.occurred_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'),0)::bigint FROM groups g JOIN group_members m ON m.group_id=g.id AND m.user_id=$2 AND m.removed_at IS NULL WHERE g.id=$1`, id, userID).
+		Scan(&g.ID, &g.Name, &g.Currency, &g.MyMemberID, &g.MyRole, &g.MemberCount, &g.ArchivedAt, &g.Version, &g.CreatedAt, &g.Kind, &g.BudgetLimit, &g.MonthSpent)
 	if dbx.IsNoRows(err) {
 		return g, apierr.ErrNotFound
 	}
@@ -277,8 +281,17 @@ func (s *Service) Get(ctx context.Context, userID, id string) (Group, error) {
 }
 
 func (s *Service) List(ctx context.Context, userID string) ([]Group, error) {
+	return s.list(ctx, userID, "group")
+}
+
+// ListSplits returns the caller's splits (see CreateSplit), newest first.
+func (s *Service) ListSplits(ctx context.Context, userID string) ([]Group, error) {
+	return s.list(ctx, userID, "split")
+}
+
+func (s *Service) list(ctx context.Context, userID, kind string) ([]Group, error) {
 	rows, err := s.db.Query(ctx, `SELECT g.id::text FROM groups g JOIN group_members m ON m.group_id=g.id AND m.user_id=$1 AND m.removed_at IS NULL
-		ORDER BY g.archived_at IS NOT NULL, lower(g.name), g.id`, userID)
+		WHERE g.kind = '`+kind+`' ORDER BY g.archived_at IS NOT NULL, g.created_at DESC, g.id`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -588,6 +601,9 @@ type ExpenseInput struct {
 	// AccountID records the payment in the caller's own ledger. Allowed only when the caller is the payer.
 	AccountID  string  `json:"account_id"`
 	CategoryID *string `json:"category_id"`
+	// TransactionID shares an existing personal expense of the caller instead of creating one: its amount must equal the expense, the
+	// caller must be the payer, and from then on only the caller's own share counts as spending (counted_amount).
+	TransactionID string `json:"transaction_id"`
 }
 
 // ComputeShares validates participants against a group and runs the split engine.
@@ -643,81 +659,8 @@ func (s *Service) AddExpense(ctx context.Context, userID, key, groupID string, i
 			out, err = s.expense(ctx, tx, userID, replay.ResourceID)
 			return err
 		}
-		myID, _, err := me(ctx, tx, userID, groupID)
-		if err != nil {
+		if err := s.addExpenseInTx(ctx, tx, userID, groupID, id, title, in); err != nil {
 			return err
-		}
-		cur, archived, err := s.groupMeta(ctx, tx, groupID)
-		if err != nil {
-			return err
-		}
-		if archived {
-			return ErrArchived
-		}
-		active, err := s.activeMembers(ctx, tx, groupID)
-		if err != nil {
-			return err
-		}
-		paidBy := ids.Normalize(in.PaidBy)
-		if paidBy == "" {
-			paidBy = myID
-		}
-		if !active[paidBy] {
-			return apierr.Validation(map[string]string{"paid_by": "Choose someone who is in the group."})
-		}
-		parts := make([]Part, 0, len(in.Participants))
-		for _, p := range in.Participants {
-			mid := ids.Normalize(p.MemberID)
-			if !active[mid] {
-				return apierr.Validation(map[string]string{"participants": "Everyone you split with must be in the group."})
-			}
-			parts = append(parts, Part{Member: mid, Value: p.Value})
-		}
-		shares, err := Compute(in.SplitMethod, in.Amount, parts)
-		if err != nil {
-			return apierr.Validation(map[string]string{"participants": capital(err.Error()) + "."})
-		}
-		when := s.now().UTC()
-		if in.OccurredAt != nil {
-			when = in.OccurredAt.UTC()
-		}
-		var txID *string
-		if in.AccountID != "" {
-			if paidBy != myID {
-				return apierr.Validation(map[string]string{"account_id": "You can record a payment in your own accounts only when you are the one who paid."})
-			}
-			aid := ids.Normalize(in.AccountID)
-			acct, err := accounts.Fetch(ctx, tx, userID, aid)
-			if err != nil || acct.ArchivedAt != nil {
-				return apierr.Validation(map[string]string{"account_id": "Choose one of your active accounts."})
-			}
-			if acct.Currency != cur {
-				return apierr.Validation(map[string]string{"account_id": "That account uses " + acct.Currency + " but the group uses " + cur + "."})
-			}
-			var mine int64 // what counts as the caller's own spending: only their share, not what they fronted for others
-			for _, sh := range shares {
-				if sh.Member == myID {
-					mine = sh.Amount
-				}
-			}
-			t, err := s.txs.CreateInTx(ctx, tx, userID, transactions.NewTx{AccountID: aid, Type: "expense", Amount: in.Amount, Title: title, CategoryID: in.CategoryID,
-				Status: "confirmed", OccurredAt: when, Timezone: "Asia/Kolkata", Source: "group", ExternalRef: "group:" + id, CountedAmount: &mine, Notes: "Group expense"})
-			if err != nil {
-				return err
-			}
-			txID = &t
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO group_expenses (id, group_id, paid_by, created_by, title, amount, currency, split_method, occurred_at, notes, transaction_id)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, id, groupID, paidBy, myID, title, in.Amount, cur, in.SplitMethod, when, in.Notes, txID); err != nil {
-			if dbx.ConstraintName(err) == "group_expenses_pkey" {
-				return transactions.ErrIDTaken
-			}
-			return err
-		}
-		for _, sh := range shares {
-			if _, err := tx.Exec(ctx, `INSERT INTO expense_shares (expense_id, member_id, amount, input) VALUES ($1,$2,$3,$4)`, id, sh.Member, sh.Amount, sh.Input); err != nil {
-				return err
-			}
 		}
 		if err := audit.Log(ctx, tx, userID, "group.expense_added", map[string]any{"group_id": groupID, "expense_id": id}); err != nil {
 			return err
@@ -729,6 +672,136 @@ func (s *Service) AddExpense(ctx context.Context, userID, key, groupID string, i
 		return err
 	})
 	return out, err
+}
+
+// addExpenseInTx records one expense (and its shares) inside the caller's transaction. It is shared by AddExpense and CreateSplit so
+// both follow exactly the same split, ledger and linking rules.
+func (s *Service) addExpenseInTx(ctx context.Context, tx pgx.Tx, userID, groupID, id, title string, in ExpenseInput) error {
+	myID, _, err := me(ctx, tx, userID, groupID)
+	if err != nil {
+		return err
+	}
+	cur, archived, err := s.groupMeta(ctx, tx, groupID)
+	if err != nil {
+		return err
+	}
+	if archived {
+		return ErrArchived
+	}
+	active, err := s.activeMembers(ctx, tx, groupID)
+	if err != nil {
+		return err
+	}
+	paidBy := ids.Normalize(in.PaidBy)
+	if paidBy == "" {
+		paidBy = myID
+	}
+	if !active[paidBy] {
+		return apierr.Validation(map[string]string{"paid_by": "Choose someone who is in the group."})
+	}
+	parts := make([]Part, 0, len(in.Participants))
+	for _, p := range in.Participants {
+		mid := ids.Normalize(p.MemberID)
+		if !active[mid] {
+			return apierr.Validation(map[string]string{"participants": "Everyone you split with must be in the group."})
+		}
+		parts = append(parts, Part{Member: mid, Value: p.Value})
+	}
+	shares, err := Compute(in.SplitMethod, in.Amount, parts)
+	if err != nil {
+		return apierr.Validation(map[string]string{"participants": capital(err.Error()) + "."})
+	}
+	when := s.now().UTC()
+	if in.OccurredAt != nil {
+		when = in.OccurredAt.UTC()
+	}
+	var txID *string
+	if in.AccountID != "" {
+		if paidBy != myID {
+			return apierr.Validation(map[string]string{"account_id": "You can record a payment in your own accounts only when you are the one who paid."})
+		}
+		aid := ids.Normalize(in.AccountID)
+		acct, err := accounts.Fetch(ctx, tx, userID, aid)
+		if err != nil || acct.ArchivedAt != nil {
+			return apierr.Validation(map[string]string{"account_id": "Choose one of your active accounts."})
+		}
+		if acct.Currency != cur {
+			return apierr.Validation(map[string]string{"account_id": "That account uses " + acct.Currency + " but the group uses " + cur + "."})
+		}
+		var mine int64 // what counts as the caller's own spending: only their share, not what they fronted for others
+		for _, sh := range shares {
+			if sh.Member == myID {
+				mine = sh.Amount
+			}
+		}
+		t, err := s.txs.CreateInTx(ctx, tx, userID, transactions.NewTx{AccountID: aid, Type: "expense", Amount: in.Amount, Title: title, CategoryID: in.CategoryID,
+			Status: "confirmed", OccurredAt: when, Timezone: "Asia/Kolkata", Source: "group", ExternalRef: "group:" + id, CountedAmount: &mine, Notes: "Group expense"})
+		if err != nil {
+			return err
+		}
+		txID = &t
+	}
+	if in.TransactionID != "" {
+		if in.AccountID != "" {
+			return apierr.Validation(map[string]string{"account_id": "Choose either an existing transaction or an account, not both."})
+		}
+		if paidBy != myID {
+			return apierr.Validation(map[string]string{"transaction_id": "You can share your own payment only when you are the one who paid."})
+		}
+		tid := ids.Normalize(in.TransactionID)
+		bad := func(m string) error { return apierr.Validation(map[string]string{"transaction_id": m}) }
+		if !ids.Valid(tid) {
+			return bad("Choose one of your transactions.")
+		}
+		var typ, tcur, tstatus, tsource string
+		var tamount int64
+		err := tx.QueryRow(ctx, `SELECT type, currency, status, source, amount FROM transactions WHERE id=$1 AND user_id=$2 FOR UPDATE`, tid, userID).Scan(&typ, &tcur, &tstatus, &tsource, &tamount)
+		switch {
+		case dbx.IsNoRows(err):
+			return bad("Choose one of your transactions.")
+		case err != nil:
+			return err
+		case typ != "expense" || (tstatus != "pending" && tstatus != "confirmed"):
+			return bad("Only a recorded expense can be shared.")
+		case tsource == "group" || tsource == "settlement":
+			return bad("That transaction already belongs to a group.")
+		case tcur != cur:
+			return bad("That transaction uses " + tcur + " but the group uses " + cur + ".")
+		case tamount != in.Amount:
+			return bad("The shared amount must equal the transaction's amount.")
+		}
+		var shared bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM group_expenses WHERE transaction_id=$1 AND voided_at IS NULL)`, tid).Scan(&shared); err != nil {
+			return err
+		}
+		if shared {
+			return apierr.New(http.StatusConflict, "already_shared", "This transaction is already shared. Void the share first to share it somewhere else.")
+		}
+		var mine int64
+		for _, sh := range shares {
+			if sh.Member == myID {
+				mine = sh.Amount
+			}
+		}
+		// Only counted_amount changes: the balance and the ledger are untouched. Analytics, budgets and trackers now count the caller's share.
+		if _, err := tx.Exec(ctx, `UPDATE transactions SET counted_amount=$2, version=version+1, updated_at=now() WHERE id=$1`, tid, mine); err != nil {
+			return err
+		}
+		txID = &tid
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO group_expenses (id, group_id, paid_by, created_by, title, amount, currency, split_method, occurred_at, notes, transaction_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, id, groupID, paidBy, myID, title, in.Amount, cur, in.SplitMethod, when, in.Notes, txID); err != nil {
+		if dbx.ConstraintName(err) == "group_expenses_pkey" {
+			return transactions.ErrIDTaken
+		}
+		return err
+	}
+	for _, sh := range shares {
+		if _, err := tx.Exec(ctx, `INSERT INTO expense_shares (expense_id, member_id, amount, input) VALUES ($1,$2,$3,$4)`, id, sh.Member, sh.Amount, sh.Input); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func capital(s string) string {
@@ -830,8 +903,16 @@ func (s *Service) VoidExpense(ctx context.Context, userID, id string) (Expense, 
 				return err
 			}
 			if e.InMyLedger && e.transactionID != nil {
-				if err := s.txs.VoidInTx(ctx, tx, userID, *e.transactionID); err != nil {
+				var src string
+				if err := tx.QueryRow(ctx, `SELECT source FROM transactions WHERE id=$1 AND user_id=$2`, *e.transactionID, userID).Scan(&src); err != nil {
 					return err
+				}
+				if src == "group" {
+					if err := s.txs.VoidInTx(ctx, tx, userID, *e.transactionID); err != nil {
+						return err
+					}
+				} else if _, err := tx.Exec(ctx, `UPDATE transactions SET counted_amount=NULL, version=version+1, updated_at=now() WHERE id=$1 AND user_id=$2`, *e.transactionID, userID); err != nil {
+					return err // an existing transaction the caller shared goes back to counting in full; it is never voided by un-sharing
 				}
 			}
 			if err := audit.Log(ctx, tx, userID, "group.expense_voided", map[string]any{"group_id": e.GroupID, "expense_id": id}); err != nil {

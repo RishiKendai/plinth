@@ -35,6 +35,10 @@ func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.H
 	mux.Handle("GET /v1/groups/{id}/settlements", r(h.listSettlements))
 	mux.Handle("POST /v1/group-settlements/{id}/void", r(h.voidSettlement))
 	mux.Handle("POST /v1/splits/preview", r(h.preview))
+	mux.Handle("POST /v1/splits", r(h.createSplit))
+	mux.Handle("GET /v1/splits", r(h.listSplits))
+	mux.Handle("GET /v1/transactions/{id}/share", r(h.shareOf))
+	mux.Handle("PUT /v1/groups/{id}/budget", r(h.setBudget))
 }
 
 func (h *Handler) create(w http.ResponseWriter, rq *http.Request) {
@@ -432,4 +436,76 @@ func (h *Handler) analytics(w http.ResponseWriter, rq *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, a)
+}
+
+func (h *Handler) createSplit(w http.ResponseWriter, rq *http.Request) {
+	uid, ok := auth.UserID(w, rq)
+	if !ok {
+		return
+	}
+	var in SplitInput
+	if err := httpx.Decode(rq, &in); err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	g, err := h.svc.CreateSplit(rq.Context(), uid, rq.Header.Get(httpx.IdempotencyHeader), in)
+	if err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	httpx.JSON(w, http.StatusCreated, g)
+}
+
+func (h *Handler) listSplits(w http.ResponseWriter, rq *http.Request) {
+	uid, ok := auth.UserID(w, rq)
+	if !ok {
+		return
+	}
+	l, err := h.svc.ListSplits(rq.Context(), uid)
+	if err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, l)
+}
+
+func (h *Handler) shareOf(w http.ResponseWriter, rq *http.Request) {
+	uid, ok := auth.UserID(w, rq)
+	if !ok {
+		return
+	}
+	id, ok := httpx.PathUUID(w, rq, "id")
+	if !ok {
+		return
+	}
+	si, err := h.svc.ShareOf(rq.Context(), uid, id)
+	if err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, si) // null when the transaction is not shared
+}
+
+func (h *Handler) setBudget(w http.ResponseWriter, rq *http.Request) {
+	uid, ok := auth.UserID(w, rq)
+	if !ok {
+		return
+	}
+	id, ok := httpx.PathUUID(w, rq, "id")
+	if !ok {
+		return
+	}
+	var in struct {
+		Limit *int64 `json:"limit"`
+	}
+	if err := httpx.Decode(rq, &in); err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	g, err := h.svc.SetBudget(rq.Context(), uid, id, in.Limit)
+	if err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, g)
 }

@@ -142,6 +142,15 @@ func (s *Service) Update(ctx context.Context, userID, key, id string, in UpdateI
 		if financial && (cur.Source == "group" || cur.Source == "settlement") {
 			return apierr.Validation(map[string]string{"amount": "This transaction belongs to a group. Void it from the group and record it again."})
 		}
+		if financial {
+			var shared bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM group_expenses WHERE transaction_id=$1 AND voided_at IS NULL)`, cur.ID).Scan(&shared); err != nil {
+				return err
+			}
+			if shared {
+				return apierr.Validation(map[string]string{"amount": "This transaction is shared with a group or split. Remove the share first, then edit it."})
+			}
+		}
 		if cur.Type == "transfer" && financial {
 			return apierr.Validation(map[string]string{"amount": "A transfer's amount, accounts and date cannot be edited. Void it and record a new transfer."})
 		}

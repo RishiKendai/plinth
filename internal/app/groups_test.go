@@ -484,3 +484,159 @@ func TestGroupValidationAndIdempotency(t *testing.T) {
 		t.Fatalf("rename: %d %s", r.Status, r.Raw)
 	}
 }
+
+func TestSharingAnExistingTransactionIntoAGroup(t *testing.T) {
+	e := setup(t)
+	tok, _, _ := e.signUp(t, "asha@example.com")
+	acct := e.newAccount(t, tok, "HDFC", "savings", 1000000)
+	bud := str(e.budget(t, tok, map[string]any{"name": "All", "period": "monthly", "limit": 5000000}).data(), "id")
+	gid, me := e.newGroup(t, tok, "Flat")
+	b := e.addPerson(t, tok, gid, "Ben")
+	tx := e.spend(t, tok, acct, 30000, map[string]any{"title": "Dinner"})
+	txID := str(tx.data(), "id")
+	if e.balance(t, tok, acct) != 970000 || i64(e.do(t, "GET", "/v1/budgets/"+bud, tok, nil).data(), "spent") != 30000 {
+		t.Fatal("setup")
+	}
+	share := func(body map[string]any) resp { return e.groupExpense(t, tok, gid, body) }
+	base := map[string]any{"title": "Dinner", "amount": 30000, "split_method": "equal", "participants": parts(me, 0, b, 0), "transaction_id": txID}
+	// Wrong amount, both account and transaction, or someone else's transaction are refused.
+	for name, body := range map[string]map[string]any{
+		"amount mismatch": {"title": "x", "amount": 100, "split_method": "equal", "participants": parts(me, 0, b, 0), "transaction_id": txID},
+		"account too":     {"title": "x", "amount": 30000, "split_method": "equal", "participants": parts(me, 0, b, 0), "transaction_id": txID, "account_id": acct},
+		"not a uuid":      {"title": "x", "amount": 30000, "split_method": "equal", "participants": parts(me, 0, b, 0), "transaction_id": "nope"},
+		"paid by Ben":     {"title": "x", "amount": 30000, "split_method": "equal", "participants": parts(me, 0, b, 0), "transaction_id": txID, "paid_by": b},
+	} {
+		if r := share(body); r.Status != 422 {
+			t.Errorf("%s: want 422 got %d %s", name, r.Status, r.Raw)
+		}
+	}
+	other, _, _ := e.signUp(t, "ravi@example.com")
+	oa := e.newAccount(t, other, "B", "savings", 1000)
+	otx := str(e.spend(t, other, oa, 30000, nil).data(), "id")
+	if r := share(map[string]any{"title": "x", "amount": 30000, "split_method": "equal", "participants": parts(me, 0, b, 0), "transaction_id": otx}); r.Status != 422 {
+		t.Fatalf("someone else's transaction: %d", r.Status)
+	}
+	r := share(base)
+	if r.Status != 201 || r.data()["in_my_ledger"] != true {
+		t.Fatalf("share: %d %s", r.Status, r.Raw)
+	}
+	// The balance is untouched, and only my half now counts as spending.
+	if e.balance(t, tok, acct) != 970000 || countTx(t) != 2 {
+		t.Fatalf("sharing must not move money or create a transaction: balance %d, transactions %d", e.balance(t, tok, acct), countTx(t))
+	}
+	if got := i64(e.do(t, "GET", "/v1/budgets/"+bud, tok, nil).data(), "spent"); got != 15000 {
+		t.Fatalf("budget counts my share only: %d", got)
+	}
+	if again := share(base); again.Status != 409 || again.errCode() != "already_shared" {
+		t.Fatalf("sharing twice: %d %s", again.Status, again.Raw)
+	}
+	// The transaction knows where it is shared; its amount can no longer be edited behind the split's back.
+	si := e.do(t, "GET", "/v1/transactions/"+txID+"/share", tok, nil).data()
+	if str(si, "group_id") != gid || i64(si, "my_share") != 15000 || i64(si, "total") != 30000 || str(si, "kind") != "group" {
+		t.Fatalf("share info: %v", si)
+	}
+	if ed := e.call(t, "PUT", "/v1/transactions/"+txID, tok, newKey(), map[string]any{"version": 2, "amount": 1}); ed.Status != 422 {
+		t.Fatalf("editing a shared amount: %d %s", ed.Status, ed.Raw)
+	}
+	if ed := e.call(t, "PUT", "/v1/transactions/"+txID, tok, newKey(), map[string]any{"version": 2, "notes": "fine"}); ed.Status != 200 {
+		t.Fatalf("a note edit is allowed: %d %s", ed.Status, ed.Raw)
+	}
+	if m := e.members(t, tok, gid); i64(m[me], "net") != 15000 || i64(m[b], "net") != -15000 {
+		t.Fatalf("nets: %v", m)
+	}
+	// Un-sharing puts the full amount back into spending and never voids the transaction or moves the balance.
+	if v := e.call(t, "POST", "/v1/group-expenses/"+str(r.data(), "id")+"/void", tok, "", nil); v.Status != 200 {
+		t.Fatalf("void: %d", v.Status)
+	}
+	if e.balance(t, tok, acct) != 970000 || i64(e.do(t, "GET", "/v1/budgets/"+bud, tok, nil).data(), "spent") != 30000 {
+		t.Fatal("un-sharing restores full spending and leaves the balance alone")
+	}
+	if e.do(t, "GET", "/v1/transactions/"+txID, tok, nil).data()["status"] != "confirmed" {
+		t.Fatal("un-sharing must not void the transaction")
+	}
+	if e.do(t, "GET", "/v1/transactions/"+txID+"/share", tok, nil).Body["data"] != nil {
+		t.Fatal("no share any more")
+	}
+	assertLedger(t)
+}
+
+func TestSplitsAreGroupsOfKindSplit(t *testing.T) {
+	e := setup(t)
+	tok, _, _ := e.signUp(t, "asha@example.com")
+	acct := e.newAccount(t, tok, "HDFC", "savings", 1000000)
+	tx := str(e.spend(t, tok, acct, 100001, map[string]any{"title": "Goa hotel"}).data(), "id")
+	me, a, b := "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"
+	body := map[string]any{"transaction_id": tx, "split_method": "equal", "my_id": me, "people": []map[string]any{{"id": a, "name": "Ben"}, {"id": b, "name": "Chitra"}}}
+	key := newKey()
+	r := e.call(t, "POST", "/v1/splits", tok, key, body)
+	if r.Status != 201 || str(r.data(), "kind") != "split" || str(r.data(), "name") != "Goa hotel" {
+		t.Fatalf("split: %d %s", r.Status, r.Raw)
+	}
+	gid := str(r.data(), "id")
+	if again := e.call(t, "POST", "/v1/splits", tok, key, body); str(again.data(), "id") != gid {
+		t.Fatal("a retry returns the same split")
+	}
+	// Splits do not clutter the groups list, and show up in the splits list.
+	if strings.Contains(e.do(t, "GET", "/v1/groups", tok, nil).Raw, gid) || !strings.Contains(e.do(t, "GET", "/v1/splits", tok, nil).Raw, gid) {
+		t.Fatal("kind separation")
+	}
+	m := e.members(t, tok, gid)
+	if len(m) != 3 || i64(m[me], "net") != 100001-33334 || i64(m[a], "net") != -33334 || i64(m[b], "net") != -33333 {
+		t.Fatalf("shares must reconcile to the cent with the odd paisa on one person: %v", m)
+	}
+	// The split is just a group: settle up works and the transaction stays untouched.
+	s := e.call(t, "POST", "/v1/groups/"+gid+"/settlements", tok, newKey(), map[string]any{"from_member": a, "to_member": me, "amount": 33334})
+	if s.Status != 201 || e.balance(t, tok, acct) != 1000000-100001 {
+		t.Fatalf("settle: %d balance %d", s.Status, e.balance(t, tok, acct))
+	}
+	// Validation: nobody to split with, someone else's transaction, a transaction already shared.
+	for name, bad := range map[string]map[string]any{
+		"no people":  {"transaction_id": tx, "split_method": "equal", "people": []map[string]any{}},
+		"already":    body,
+		"bad tx":     {"transaction_id": "nope", "split_method": "equal", "people": []map[string]any{{"name": "x"}}},
+		"blank name": {"transaction_id": tx, "split_method": "equal", "people": []map[string]any{{"name": " "}}},
+		"bad method": {"transaction_id": tx, "split_method": "weird", "people": []map[string]any{{"name": "x"}}},
+	} {
+		if r := e.call(t, "POST", "/v1/splits", tok, newKey(), bad); r.Status < 400 {
+			t.Errorf("%s: want an error, got %d", name, r.Status)
+		}
+	}
+	// A failed split leaves nothing behind (one database transaction).
+	var n int
+	_ = pool.QueryRow(t.Context(), `SELECT count(*) FROM groups WHERE kind='split'`).Scan(&n)
+	if n != 1 {
+		t.Fatalf("failed splits must not leave groups behind: %d", n)
+	}
+	assertLedger(t)
+}
+
+func TestGroupBudgetIsAMonthlyLimitOnGroupSpending(t *testing.T) {
+	e := setup(t)
+	ta, _, _ := e.signUp(t, "asha@example.com")
+	tb, _, _ := e.signUp(t, "ravi@example.com")
+	gid, me := e.newGroup(t, ta, "Flat")
+	b := e.addPerson(t, ta, gid, "Ben")
+	e.groupExpense(t, ta, gid, map[string]any{"title": "Rent", "amount": 40000, "split_method": "equal", "participants": parts(me, 0, b, 0)})
+	g := e.call(t, "PUT", "/v1/groups/"+gid+"/budget", ta, "", map[string]any{"limit": 100000})
+	if g.Status != 200 || i64(g.data(), "budget_limit") != 100000 || i64(g.data(), "month_spent") != 40000 {
+		t.Fatalf("set: %d %s", g.Status, g.Raw)
+	}
+	for _, bad := range []int{0, -5} {
+		if r := e.call(t, "PUT", "/v1/groups/"+gid+"/budget", ta, "", map[string]any{"limit": bad}); r.Status != 422 {
+			t.Errorf("limit %d: %d", bad, r.Status)
+		}
+	}
+	// Going over never blocks spending; it is only shown.
+	if r := e.groupExpense(t, ta, gid, map[string]any{"title": "More", "amount": 90000, "split_method": "equal", "participants": parts(me, 0, b, 0)}); r.Status != 201 {
+		t.Fatalf("over the limit must still save: %d", r.Status)
+	}
+	if v := e.do(t, "GET", "/v1/groups/"+gid, ta, nil).data(); i64(v, "month_spent") != 130000 {
+		t.Fatalf("month spent: %v", v)
+	}
+	if r := e.call(t, "PUT", "/v1/groups/"+gid+"/budget", tb, "", map[string]any{"limit": 1}); r.Status != 404 {
+		t.Fatalf("outsider: %d", r.Status)
+	}
+	if c := e.call(t, "PUT", "/v1/groups/"+gid+"/budget", ta, "", map[string]any{"limit": nil}); c.Status != 200 || c.data()["budget_limit"] != nil {
+		t.Fatalf("clear: %d %s", c.Status, c.Raw)
+	}
+}
