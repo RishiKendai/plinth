@@ -55,7 +55,10 @@ type Group struct {
 	Version     int        `json:"version"`
 	Kind        string     `json:"kind"`         // group | split
 	Purpose     string     `json:"purpose"`      // budget | tracker, fixed at creation
-	BudgetLimit *int64     `json:"budget_limit"` // monthly limit on the group's total spending, or null
+	BudgetLimit *int64     `json:"budget_limit"` // a budget's opening amount (null for a tracker)
+	TopupTotal  int64      `json:"topup_total"`  // everything added to a budget since
+	SpentTotal  int64      `json:"spent_total"`  // everything the group has spent
+	Remaining   *int64     `json:"remaining"`    // budget: opening amount + top-ups - spent; null for a tracker
 	MonthSpent  int64      `json:"month_spent"`  // what the group spent this (UTC) month
 	CreatedAt   time.Time  `json:"created_at"`
 }
@@ -209,9 +212,9 @@ func (s *Service) Create(ctx context.Context, userID, key string, in CreateInput
 	case purpose != "budget" && purpose != "tracker":
 		f["purpose"] = "Choose budget or spending tracker."
 	case purpose == "budget" && (in.BudgetLimit == nil || *in.BudgetLimit <= 0 || *in.BudgetLimit > 1_000_000_000_000_000):
-		f["budget_limit"] = "A budget needs a monthly limit greater than zero."
+		f["budget_limit"] = "A budget needs an amount greater than zero to start with."
 	case purpose == "tracker" && in.BudgetLimit != nil:
-		f["budget_limit"] = "A spending tracker has no limit."
+		f["budget_limit"] = "A spending tracker has no money to set aside."
 	}
 	id := ids.Normalize(in.ID)
 	if in.ID != "" && !ids.Valid(id) {
@@ -273,12 +276,18 @@ func (s *Service) get(ctx context.Context, q dbx.Q, userID, id string) (Group, e
 	var g Group
 	err := q.QueryRow(ctx, `SELECT g.id::text, g.name, g.currency, m.id::text, m.role, (SELECT count(*) FROM group_members x WHERE x.group_id=g.id AND x.removed_at IS NULL),
 		g.archived_at, g.version, g.created_at, g.kind, g.budget_limit, g.purpose,
+		COALESCE((SELECT SUM(t.amount) FROM group_topups t WHERE t.group_id=g.id AND t.voided_at IS NULL),0)::bigint,
+		COALESCE((SELECT SUM(e.amount) FROM group_expenses e WHERE e.group_id=g.id AND e.voided_at IS NULL),0)::bigint,
 		COALESCE((SELECT SUM(e.amount) FROM group_expenses e WHERE e.group_id=g.id AND e.voided_at IS NULL AND e.occurred_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'),0)::bigint FROM groups g JOIN group_members m ON m.group_id=g.id AND m.user_id=$2 AND m.removed_at IS NULL WHERE g.id=$1`, id, userID).
-		Scan(&g.ID, &g.Name, &g.Currency, &g.MyMemberID, &g.MyRole, &g.MemberCount, &g.ArchivedAt, &g.Version, &g.CreatedAt, &g.Kind, &g.BudgetLimit, &g.Purpose, &g.MonthSpent)
+		Scan(&g.ID, &g.Name, &g.Currency, &g.MyMemberID, &g.MyRole, &g.MemberCount, &g.ArchivedAt, &g.Version, &g.CreatedAt, &g.Kind, &g.BudgetLimit, &g.Purpose, &g.TopupTotal, &g.SpentTotal, &g.MonthSpent)
 	if dbx.IsNoRows(err) {
 		return g, apierr.ErrNotFound
 	}
 	g.CreatedAt = g.CreatedAt.UTC()
+	if g.BudgetLimit != nil {
+		rem := *g.BudgetLimit + g.TopupTotal - g.SpentTotal
+		g.Remaining = &rem
+	}
 	if err == nil {
 		b, berr := s.balances(ctx, q, userID, id)
 		if berr == nil {
@@ -703,6 +712,18 @@ func (s *Service) addExpenseInTx(ctx context.Context, tx pgx.Tx, userID, groupID
 	}
 	if archived {
 		return ErrArchived
+	}
+	// A budget is a pot: lock it, and refuse an expense bigger than what is left (reaching exactly zero is fine).
+	var purpose string
+	var remaining int64
+	if err := tx.QueryRow(ctx, `SELECT g.purpose, COALESCE(g.budget_limit,0)
+		+ COALESCE((SELECT SUM(t.amount) FROM group_topups t WHERE t.group_id=g.id AND t.voided_at IS NULL),0)
+		- COALESCE((SELECT SUM(e.amount) FROM group_expenses e WHERE e.group_id=g.id AND e.voided_at IS NULL),0)
+		FROM groups g WHERE g.id=$1 FOR UPDATE`, groupID).Scan(&purpose, &remaining); err != nil {
+		return err
+	}
+	if purpose == "budget" && in.Amount > remaining {
+		return apierr.New(http.StatusConflict, "budget_exhausted", "This budget does not have enough left for that expense. Top it up first.")
 	}
 	active, err := s.activeMembers(ctx, tx, groupID)
 	if err != nil {

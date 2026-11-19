@@ -174,7 +174,7 @@ func (s *Service) spentByPeriod(ctx context.Context, q dbx.Q, userID string, b B
 	}
 	rows, err := q.Query(ctx, `WITH e AS (
 			SELECT t.id, COALESCE(t.counted_amount, t.amount) AS amount, `+bucket+` AS b FROM transactions t
-			WHERE t.user_id = $1 AND t.type = 'expense' AND t.status IN ('pending','confirmed') AND t.source NOT IN ('reconcile','settlement') AND t.currency = $2
+			WHERE t.user_id = $1 AND t.type = 'expense' AND t.status IN ('pending','confirmed') AND t.source NOT IN ('reconcile','settlement','topup') AND t.currency = $2
 			  AND ($3::uuid IS NULL OR t.account_id = $3)
 			  AND ($4::uuid IS NULL OR t.category_id = $4 OR t.category_id IN (SELECT id FROM categories WHERE parent_id = $4))
 			  AND (t.occurred_at AT TIME ZONE $7)::date BETWEEN $5 AND $6 AND $8::date IS NOT NULL)

@@ -139,7 +139,7 @@ func (s *Service) Update(ctx context.Context, userID, key, id string, in UpdateI
 			return err
 		}
 		financial := in.financial(cur)
-		if financial && (cur.Source == "group" || cur.Source == "settlement") {
+		if financial && (cur.Source == "group" || cur.Source == "settlement" || cur.Source == "topup") {
 			return apierr.Validation(map[string]string{"amount": "This transaction belongs to a group. Void it from the group and record it again."})
 		}
 		if financial {

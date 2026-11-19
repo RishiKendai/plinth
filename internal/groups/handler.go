@@ -38,7 +38,10 @@ func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.H
 	mux.Handle("POST /v1/splits", r(h.createSplit))
 	mux.Handle("GET /v1/splits", r(h.listSplits))
 	mux.Handle("GET /v1/transactions/{id}/share", r(h.shareOf))
-	mux.Handle("PUT /v1/groups/{id}/budget", r(h.setBudget))
+	mux.Handle("POST /v1/groups/{id}/topups", r(h.addTopup))
+	mux.Handle("GET /v1/groups/{id}/topups", r(h.listTopups))
+	mux.Handle("POST /v1/group-topups/{id}/void", r(h.voidTopup))
+	mux.Handle("DELETE /v1/groups/{id}", r(h.deleteGroup))
 }
 
 func (h *Handler) create(w http.ResponseWriter, rq *http.Request) {
@@ -486,7 +489,7 @@ func (h *Handler) shareOf(w http.ResponseWriter, rq *http.Request) {
 	httpx.JSON(w, http.StatusOK, si) // null when the transaction is not shared
 }
 
-func (h *Handler) setBudget(w http.ResponseWriter, rq *http.Request) {
+func (h *Handler) addTopup(w http.ResponseWriter, rq *http.Request) {
 	uid, ok := auth.UserID(w, rq)
 	if !ok {
 		return
@@ -495,17 +498,65 @@ func (h *Handler) setBudget(w http.ResponseWriter, rq *http.Request) {
 	if !ok {
 		return
 	}
-	var in struct {
-		Limit *int64 `json:"limit"`
-	}
+	var in TopupInput
 	if err := httpx.Decode(rq, &in); err != nil {
 		httpx.Error(w, rq, err)
 		return
 	}
-	g, err := h.svc.SetBudget(rq.Context(), uid, id, in.Limit)
+	t, err := h.svc.AddTopup(rq.Context(), uid, rq.Header.Get(httpx.IdempotencyHeader), id, in)
 	if err != nil {
 		httpx.Error(w, rq, err)
 		return
 	}
-	httpx.JSON(w, http.StatusOK, g)
+	httpx.JSON(w, http.StatusCreated, t)
+}
+
+func (h *Handler) listTopups(w http.ResponseWriter, rq *http.Request) {
+	uid, ok := auth.UserID(w, rq)
+	if !ok {
+		return
+	}
+	id, ok := httpx.PathUUID(w, rq, "id")
+	if !ok {
+		return
+	}
+	l, err := h.svc.ListTopups(rq.Context(), uid, id)
+	if err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, l)
+}
+
+func (h *Handler) voidTopup(w http.ResponseWriter, rq *http.Request) {
+	uid, ok := auth.UserID(w, rq)
+	if !ok {
+		return
+	}
+	id, ok := httpx.PathUUID(w, rq, "id")
+	if !ok {
+		return
+	}
+	t, err := h.svc.VoidTopup(rq.Context(), uid, id)
+	if err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, t)
+}
+
+func (h *Handler) deleteGroup(w http.ResponseWriter, rq *http.Request) {
+	uid, ok := auth.UserID(w, rq)
+	if !ok {
+		return
+	}
+	id, ok := httpx.PathUUID(w, rq, "id")
+	if !ok {
+		return
+	}
+	if err := h.svc.DeleteGroup(rq.Context(), uid, id); err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	httpx.NoContent(w)
 }

@@ -132,14 +132,14 @@ const factsCTE = `WITH facts AS (
 	       (t.occurred_at AT TIME ZONE $5::text)::date AS d, COALESCE(t.counted_amount, t.amount) AS amt, 1 AS n
 	FROM transactions t
 	WHERE t.user_id = $1 AND t.currency = $2 AND t.type IN ('expense','income') AND t.refund_of IS NULL
-	  AND t.status IN ('pending','confirmed') AND t.source NOT IN ('reconcile','settlement')
+	  AND t.status IN ('pending','confirmed') AND t.source NOT IN ('reconcile','settlement','topup')
 	  AND t.occurred_at >= $3 AND t.occurred_at < $4 AND ($6::uuid IS NULL OR t.account_id = $6::uuid)
 	UNION ALL
 	SELECT e.id, 'expense', e.category_id, e.account_id, e.payment_method, e.payee_name, e.title, e.occurred_at,
 	       (e.occurred_at AT TIME ZONE $5::text)::date, -LEAST(r.amount, COALESCE(e.counted_amount, e.amount)), 0
 	FROM transactions r JOIN transactions e ON e.id = r.refund_of
 	WHERE r.user_id = $1 AND r.currency = $2 AND r.status IN ('pending','confirmed')
-	  AND e.status IN ('pending','confirmed') AND e.type = 'expense' AND e.source NOT IN ('reconcile','settlement')
+	  AND e.status IN ('pending','confirmed') AND e.type = 'expense' AND e.source NOT IN ('reconcile','settlement','topup')
 	  AND e.occurred_at >= $3 AND e.occurred_at < $4 AND ($6::uuid IS NULL OR e.account_id = $6::uuid)
 )`
 

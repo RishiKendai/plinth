@@ -613,59 +613,168 @@ func TestSplitsAreGroupsOfKindSplit(t *testing.T) {
 func TestEveryGroupIsABudgetOrASpendingTrackerChosenAtCreation(t *testing.T) {
 	e := setup(t)
 	ta, _, _ := e.signUp(t, "asha@example.com")
-	tb, _, _ := e.signUp(t, "ravi@example.com")
 	mk := func(body map[string]any) resp { return e.call(t, "POST", "/v1/groups", ta, newKey(), body) }
-	// Validation: a budget needs a limit, a tracker has none, and the purpose must be one of the two.
 	for name, body := range map[string]map[string]any{
-		"budget without limit": {"name": "B", "purpose": "budget"},
-		"budget with zero":     {"name": "B", "purpose": "budget", "budget_limit": 0},
-		"tracker with a limit": {"name": "T", "purpose": "tracker", "budget_limit": 5000},
-		"unknown purpose":      {"name": "X", "purpose": "savings"},
+		"budget without an amount": {"name": "B", "purpose": "budget"},
+		"budget with zero":         {"name": "B", "purpose": "budget", "budget_limit": 0},
+		"tracker with an amount":   {"name": "T", "purpose": "tracker", "budget_limit": 5000},
+		"unknown purpose":          {"name": "X", "purpose": "savings"},
 	} {
 		if r := mk(body); r.Status != 422 {
 			t.Errorf("%s: want 422 got %d %s", name, r.Status, r.Raw)
 		}
 	}
 	tr := mk(map[string]any{"name": "Trip", "purpose": "tracker"})
-	if tr.Status != 201 || str(tr.data(), "purpose") != "tracker" || tr.data()["budget_limit"] != nil {
+	if tr.Status != 201 || str(tr.data(), "purpose") != "tracker" || tr.data()["budget_limit"] != nil || tr.data()["remaining"] != nil {
 		t.Fatalf("tracker: %d %s", tr.Status, tr.Raw)
 	}
 	if def := mk(map[string]any{"name": "Old client"}); str(def.data(), "purpose") != "tracker" {
 		t.Fatalf("a client that sends no purpose gets a tracker: %s", def.Raw)
 	}
 	bd := mk(map[string]any{"name": "Flat", "purpose": "budget", "budget_limit": 100000})
-	if bd.Status != 201 || str(bd.data(), "purpose") != "budget" || i64(bd.data(), "budget_limit") != 100000 {
+	if bd.Status != 201 || str(bd.data(), "purpose") != "budget" || i64(bd.data(), "remaining") != 100000 {
 		t.Fatalf("budget: %d %s", bd.Status, bd.Raw)
 	}
-	gid, me := str(bd.data(), "id"), str(bd.data(), "my_member_id")
-	b := e.addPerson(t, ta, gid, "Ben")
-	e.groupExpense(t, ta, gid, map[string]any{"title": "Rent", "amount": 40000, "split_method": "equal", "participants": parts(me, 0, b, 0)})
-	if v := e.do(t, "GET", "/v1/groups/"+gid, ta, nil).data(); i64(v, "month_spent") != 40000 {
-		t.Fatalf("month spent: %v", v)
-	}
-	// The limit of a budget can change but never be removed; going over never blocks spending.
-	if c := e.call(t, "PUT", "/v1/groups/"+gid+"/budget", ta, "", map[string]any{"limit": 200000}); c.Status != 200 || i64(c.data(), "budget_limit") != 200000 {
-		t.Fatalf("change: %d %s", c.Status, c.Raw)
-	}
-	for _, bad := range []any{0, -5, nil} {
-		if r := e.call(t, "PUT", "/v1/groups/"+gid+"/budget", ta, "", map[string]any{"limit": bad}); r.Status != 422 {
-			t.Errorf("limit %v: %d", bad, r.Status)
-		}
-	}
-	if r := e.groupExpense(t, ta, gid, map[string]any{"title": "More", "amount": 900000, "split_method": "equal", "participants": parts(me, 0, b, 0)}); r.Status != 201 {
-		t.Fatalf("over the limit must still save: %d", r.Status)
-	}
-	// A tracker has no limit to set, and nobody can turn a tracker into a budget or the reverse.
-	if r := e.call(t, "PUT", "/v1/groups/"+str(tr.data(), "id")+"/budget", ta, "", map[string]any{"limit": 100}); r.Status != 409 || r.errCode() != "not_a_budget" {
-		t.Fatalf("limit on a tracker: %d %s", r.Status, r.Raw)
-	}
-	if _, err := pool.Exec(t.Context(), `UPDATE groups SET purpose='tracker' WHERE id=$1`, gid); err == nil {
+	if _, err := pool.Exec(t.Context(), `UPDATE groups SET purpose='tracker' WHERE id=$1`, str(bd.data(), "id")); err == nil {
 		t.Fatal("the database must refuse to change a group's purpose")
 	}
-	if _, err := pool.Exec(t.Context(), `UPDATE groups SET budget_limit=NULL WHERE id=$1`, gid); err == nil {
-		t.Fatal("a budget can never lose its limit")
+	if _, err := pool.Exec(t.Context(), `UPDATE groups SET budget_limit=NULL WHERE id=$1`, str(bd.data(), "id")); err == nil {
+		t.Fatal("a budget can never lose its amount")
 	}
-	if r := e.call(t, "PUT", "/v1/groups/"+gid+"/budget", tb, "", map[string]any{"limit": 1}); r.Status != 404 {
+}
+
+func TestABudgetIsAPotOfMoneyThatCanBeToppedUp(t *testing.T) {
+	e := setup(t)
+	ta, _, _ := e.signUp(t, "asha@example.com")
+	acct := e.newAccount(t, ta, "HDFC", "savings", 1000000)
+	bud := str(e.budget(t, ta, map[string]any{"name": "All", "period": "monthly", "limit": 5000000}).data(), "id")
+	g := e.call(t, "POST", "/v1/groups", ta, newKey(), map[string]any{"name": "Trip", "purpose": "budget", "budget_limit": 100000})
+	gid, me := str(g.data(), "id"), str(g.data(), "my_member_id")
+	spend := func(amount int64) resp {
+		return e.groupExpense(t, ta, gid, map[string]any{"title": "x", "amount": amount, "split_method": "equal", "participants": parts(me, 0)})
+	}
+	if r := spend(40000); r.Status != 201 {
+		t.Fatalf("spend: %d %s", r.Status, r.Raw)
+	}
+	rem := func() int64 { return i64(e.do(t, "GET", "/v1/groups/"+gid, ta, nil).data(), "remaining") }
+	if rem() != 60000 {
+		t.Fatalf("remaining %d", rem())
+	}
+	// More than what is left is refused; exactly what is left is fine; then nothing more.
+	if r := spend(60001); r.Status != 409 || r.errCode() != "budget_exhausted" {
+		t.Fatalf("over the pot: %d %s", r.Status, r.Raw)
+	}
+	if r := spend(60000); r.Status != 201 || rem() != 0 {
+		t.Fatalf("spend the rest: %d remaining %d", r.Status, rem())
+	}
+	if r := spend(1); r.Status != 409 {
+		t.Fatalf("an empty budget accepts nothing: %d", r.Status)
+	}
+	// A top-up is a recorded transaction of the group; with an account it also leaves that account but is not spending.
+	key := newKey()
+	body := map[string]any{"amount": 50000, "note": "More for the trip", "account_id": acct}
+	tp := e.call(t, "POST", "/v1/groups/"+gid+"/topups", ta, key, body)
+	if tp.Status != 201 || tp.data()["in_my_ledger"] != true || rem() != 50000 {
+		t.Fatalf("top-up: %d %s remaining %d", tp.Status, tp.Raw, rem())
+	}
+	if again := e.call(t, "POST", "/v1/groups/"+gid+"/topups", ta, key, body); str(again.data(), "id") != str(tp.data(), "id") || rem() != 50000 {
+		t.Fatal("a retried top-up must not add twice")
+	}
+	if e.balance(t, ta, acct) != 950000 {
+		t.Fatalf("the money left my account: %d", e.balance(t, ta, acct))
+	}
+	var src string
+	_ = pool.QueryRow(t.Context(), `SELECT source FROM transactions WHERE external_ref LIKE 'topup:%'`).Scan(&src)
+	if src != "topup" {
+		t.Fatalf("source %q", src)
+	}
+	if spent := i64(e.do(t, "GET", "/v1/budgets/"+bud, ta, nil).data(), "spent"); spent != 0 {
+		t.Fatalf("a top-up is not spending: %d", spent)
+	}
+	if r := spend(50000); r.Status != 201 || rem() != 0 {
+		t.Fatalf("spend the top-up: %d", r.Status)
+	}
+	// The money is spent, so the top-up cannot be taken back; after voiding that expense it can.
+	if v := e.call(t, "POST", "/v1/group-topups/"+str(tp.data(), "id")+"/void", ta, "", nil); v.Status != 409 || v.errCode() != "topup_spent" {
+		t.Fatalf("void spent top-up: %d %s", v.Status, v.Raw)
+	}
+	list := e.do(t, "GET", "/v1/groups/"+gid+"/topups", ta, nil).Body["data"].([]any)
+	if len(list) != 1 {
+		t.Fatalf("top-ups: %d", len(list))
+	}
+	for _, bad := range []map[string]any{{"amount": 0}, {"amount": -1}, {"amount": 10, "account_id": "nope"}} {
+		if r := e.call(t, "POST", "/v1/groups/"+gid+"/topups", ta, newKey(), bad); r.Status != 422 {
+			t.Errorf("%v: %d", bad, r.Status)
+		}
+	}
+	// A tracker has no money to top up.
+	tr := e.call(t, "POST", "/v1/groups", ta, newKey(), map[string]any{"name": "T", "purpose": "tracker"})
+	if r := e.call(t, "POST", "/v1/groups/"+str(tr.data(), "id")+"/topups", ta, newKey(), map[string]any{"amount": 5}); r.Status != 409 || r.errCode() != "not_a_budget" {
+		t.Fatalf("topping up a tracker: %d %s", r.Status, r.Raw)
+	}
+	assertLedger(t)
+}
+
+func TestDeletingAGroupRemovesItsRecordsAndReversesWhatItCreated(t *testing.T) {
+	e := setup(t)
+	ta, _, _ := e.signUp(t, "asha@example.com")
+	tb, _, _ := e.signUp(t, "ravi@example.com")
+	acct := e.newAccount(t, ta, "HDFC", "savings", 1000000)
+	g := e.call(t, "POST", "/v1/groups", ta, newKey(), map[string]any{"name": "Trip", "purpose": "budget", "budget_limit": 500000})
+	gid, me := str(g.data(), "id"), str(g.data(), "my_member_id")
+	b := e.addPerson(t, ta, gid, "Ben")
+	e.groupExpense(t, ta, gid, map[string]any{"title": "Hotel", "amount": 30000, "split_method": "equal", "participants": parts(me, 0, b, 0), "account_id": acct})
+	manual := str(e.spend(t, ta, acct, 10000, map[string]any{"title": "Taxi"}).data(), "id")
+	e.groupExpense(t, ta, gid, map[string]any{"title": "Taxi", "amount": 10000, "split_method": "equal", "participants": parts(me, 0, b, 0), "transaction_id": manual})
+	e.call(t, "POST", "/v1/groups/"+gid+"/topups", ta, newKey(), map[string]any{"amount": 20000, "account_id": acct})
+	e.call(t, "POST", "/v1/groups/"+gid+"/settlements", ta, newKey(), map[string]any{"from_member": b, "to_member": me, "amount": 1000, "account_id": acct})
+	if e.balance(t, ta, acct) != 1000000-30000-10000-20000+1000 {
+		t.Fatalf("setup balance %d", e.balance(t, ta, acct))
+	}
+	// Someone else cannot delete it; a plain member cannot either.
+	if r := e.call(t, "DELETE", "/v1/groups/"+gid, tb, "", nil); r.Status != 404 {
 		t.Fatalf("outsider: %d", r.Status)
+	}
+	if r := e.call(t, "DELETE", "/v1/groups/"+gid, ta, "", nil); r.Status != 204 {
+		t.Fatalf("delete: %d %s", r.Status, r.Raw)
+	}
+	for _, q := range []string{"groups", "group_members", "group_expenses", "expense_shares", "group_settlements", "group_topups"} {
+		if n := assertCount(t, `SELECT count(*) FROM `+q+` WHERE true`); n != 0 && q != "groups" {
+			t.Errorf("%s still has %d rows", q, n)
+		}
+	}
+	if r := e.do(t, "GET", "/v1/groups/"+gid, ta, nil); r.Status != 404 {
+		t.Fatalf("gone: %d", r.Status)
+	}
+	// Money the group moved through my accounts is reversed (history keeps the reversed rows); the taxi I shared is whole again.
+	if e.balance(t, ta, acct) != 1000000-10000 {
+		t.Fatalf("balance after delete: %d (only the taxi should remain)", e.balance(t, ta, acct))
+	}
+	taxi := e.do(t, "GET", "/v1/transactions/"+manual, ta, nil).data()
+	if str(taxi, "status") != "confirmed" || taxi["counted_amount"] != nil {
+		t.Fatalf("the shared taxi counts in full again: %v", taxi)
+	}
+	assertLedger(t)
+}
+
+func TestAGroupWithOtherPlintUsersCannotBeDeleted(t *testing.T) {
+	e := setup(t)
+	ta, _, _ := e.signUp(t, "asha@example.com")
+	tb, _, _ := e.signUp(t, "ravi@example.com")
+	gid, _ := e.newGroup(t, ta, "Flat")
+	slot := e.addPerson(t, ta, gid, "Ravi")
+	code := str(e.call(t, "POST", "/v1/groups/"+gid+"/members/"+slot+"/invite", ta, "", nil).data(), "code")
+	e.call(t, "POST", "/v1/group-invites/redeem", tb, "", map[string]any{"code": code})
+	if r := e.call(t, "DELETE", "/v1/groups/"+gid, ta, "", nil); r.Status != 409 || r.errCode() != "has_other_members" {
+		t.Fatalf("delete with a member: %d %s", r.Status, r.Raw)
+	}
+	if r := e.call(t, "DELETE", "/v1/groups/"+gid, tb, "", nil); r.Status != 403 {
+		t.Fatalf("a plain member cannot delete: %d", r.Status)
+	}
+	if r := e.call(t, "DELETE", "/v1/groups/"+gid+"/members/"+slot, ta, "", nil); r.Status != 204 {
+		t.Fatalf("remove: %d", r.Status)
+	}
+	if r := e.call(t, "DELETE", "/v1/groups/"+gid, ta, "", nil); r.Status != 204 {
+		t.Fatalf("delete after removing them: %d %s", r.Status, r.Raw)
 	}
 }

@@ -322,7 +322,7 @@ func (s *Service) AddTransactions(ctx context.Context, userID, id string, txIDs 
 			return apierr.New(http.StatusConflict, "tracker_archived", "This tracker is archived. Restore it to add transactions.")
 		}
 		var ok int
-		if err := tx.QueryRow(ctx, `SELECT count(DISTINCT id) FROM transactions WHERE id = ANY($1::uuid[]) AND user_id=$2 AND type='expense' AND currency=$3 AND source NOT IN ('reconcile','settlement')`,
+		if err := tx.QueryRow(ctx, `SELECT count(DISTINCT id) FROM transactions WHERE id = ANY($1::uuid[]) AND user_id=$2 AND type='expense' AND currency=$3 AND source NOT IN ('reconcile','settlement','topup')`,
 			norm, userID, cur).Scan(&ok); err != nil {
 			return err
 		}
