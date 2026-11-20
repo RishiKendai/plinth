@@ -582,143 +582,10 @@ func TestCSVExportIsProtectedAndSafe(t *testing.T) {
 	}
 }
 
-// ---- UPI ----
-
-func (e *env) startUPI(t *testing.T, tok, acct string, amount int64) string {
-	t.Helper()
-	r := e.call(t, "POST", "/v1/upi/payments", tok, "", map[string]any{"account_id": acct, "payee_vpa": "swiggy@icici", "payee_name": "Swiggy", "amount": amount, "note": "Dinner"})
-	if r.Status != 201 {
-		t.Fatalf("start: %d %s", r.Status, r.Raw)
-	}
-	return str(r.data(), "id")
-}
-
 func countTx(t *testing.T) int {
 	var n int
 	_ = pool.QueryRow(context.Background(), `SELECT count(*) FROM transactions`).Scan(&n)
 	return n
-}
-
-func TestUPILaunchAloneNeverRecordsSuccess(t *testing.T) { // exit criterion
-	e := setup(t)
-	tok, _, _ := e.signUp(t, "asha@example.com")
-	a := e.newAccount(t, tok, "HDFC", "savings", 100000)
-	id := e.startUPI(t, tok, a, 25000)
-	if countTx(t) != 0 || e.balance(t, tok, a) != 100000 {
-		t.Fatal("starting a payment must not record anything")
-	}
-	h := e.call(t, "POST", "/v1/upi/payments/"+id+"/handoff", tok, "", nil)
-	if h.Status != 200 || str(h.data(), "status") != "handed_off" || str(h.data(), "step") != "in_upi_app" {
-		t.Fatalf("handoff: %d %s", h.Status, h.Raw)
-	}
-	if h2 := e.call(t, "POST", "/v1/upi/payments/"+id+"/handoff", tok, "", nil); h2.Status != 200 {
-		t.Fatal("handoff is idempotent")
-	}
-	if countTx(t) != 0 || e.balance(t, tok, a) != 100000 || h.data()["transaction_id"] != nil || h.data()["bank_verified"] != false {
-		t.Fatal("opening the UPI app must not record a payment or mark it verified")
-	}
-	// Only the user's answer records anything.
-	o := e.call(t, "POST", "/v1/upi/payments/"+id+"/outcome", tok, newKey(), map[string]any{"outcome": "paid"})
-	if o.Status != 200 || str(o.data(), "step") != "recorded" || o.data()["transaction_id"] == nil || o.data()["bank_verified"] != false {
-		t.Fatalf("outcome: %d %s", o.Status, o.Raw)
-	}
-	tx := e.do(t, "GET", "/v1/transactions/"+str(o.data(), "transaction_id"), tok, nil).data()
-	if str(tx, "status") != "confirmed" || str(tx, "source") != "upi" || str(tx, "payment_method") != "upi" || i64(tx, "amount") != 25000 {
-		t.Fatalf("transaction: %v", tx)
-	}
-	if e.balance(t, tok, a) != 75000 {
-		t.Fatal("balance")
-	}
-	// A second answer changes nothing.
-	if again := e.call(t, "POST", "/v1/upi/payments/"+id+"/outcome", tok, newKey(), map[string]any{"outcome": "failed"}); again.Status != 409 {
-		t.Fatalf("second outcome: %d", again.Status)
-	}
-	assertLedger(t)
-}
-
-func TestUPIOutcomes(t *testing.T) {
-	e := setup(t)
-	tok, _, _ := e.signUp(t, "asha@example.com")
-	a := e.newAccount(t, tok, "HDFC", "savings", 100000)
-	// Failed: nothing recorded.
-	f := e.startUPI(t, tok, a, 1000)
-	if o := e.call(t, "POST", "/v1/upi/payments/"+f+"/outcome", tok, newKey(), map[string]any{"outcome": "failed"}); o.Status != 200 || str(o.data(), "step") != "not_completed" || o.data()["transaction_id"] != nil {
-		t.Fatalf("failed: %s", o.Raw)
-	}
-	if countTx(t) != 0 || e.balance(t, tok, a) != 100000 {
-		t.Fatal("a failed payment records nothing")
-	}
-	// Not sure: pending transaction plus a reminder; resolving confirms the same transaction.
-	u := e.startUPI(t, tok, a, 5000)
-	k := newKey()
-	o := e.call(t, "POST", "/v1/upi/payments/"+u+"/outcome", tok, k, map[string]any{"outcome": "not_sure"})
-	if o.Status != 200 || str(o.data(), "status") != "uncertain" {
-		t.Fatalf("not sure: %s", o.Raw)
-	}
-	txID := str(o.data(), "transaction_id")
-	if tx := e.do(t, "GET", "/v1/transactions/"+txID, tok, nil).data(); str(tx, "status") != "pending" {
-		t.Fatalf("uncertain = pending, got %v", tx)
-	}
-	if rem := e.do(t, "GET", "/v1/reminders", tok, nil).Body["data"].([]any); len(rem) != 1 || !strings.Contains(str(rem[0].(map[string]any), "title"), "Check your UPI payment") {
-		t.Fatalf("an uncertain payment gets a reminder: %v", rem)
-	}
-	if e.balance(t, tok, a) != 95000 {
-		t.Fatal("pending counts toward the balance (owner rule)")
-	}
-	if r := e.call(t, "POST", "/v1/upi/payments/"+u+"/outcome", tok, k, map[string]any{"outcome": "not_sure"}); r.Status != 200 || str(r.data(), "transaction_id") != txID {
-		t.Fatalf("replay: %d", r.Status)
-	}
-	if r := e.call(t, "POST", "/v1/upi/payments/"+u+"/outcome", tok, newKey(), map[string]any{"outcome": "paid"}); r.Status != 200 || str(r.data(), "status") != "paid" || str(r.data(), "transaction_id") != txID {
-		t.Fatalf("resolve to paid: %s", r.Raw)
-	}
-	if tx := e.do(t, "GET", "/v1/transactions/"+txID, tok, nil).data(); str(tx, "status") != "confirmed" {
-		t.Fatalf("resolved: %v", tx)
-	}
-	if countTx(t) != 1 || e.balance(t, tok, a) != 95000 {
-		t.Fatalf("one transaction in total, got %d", countTx(t))
-	}
-	// Resolving to failed reverses the pending transaction.
-	u2 := e.startUPI(t, tok, a, 7000)
-	e.call(t, "POST", "/v1/upi/payments/"+u2+"/outcome", tok, newKey(), map[string]any{"outcome": "not_sure"})
-	e.call(t, "POST", "/v1/upi/payments/"+u2+"/outcome", tok, newKey(), map[string]any{"outcome": "failed"})
-	if e.balance(t, tok, a) != 95000 {
-		t.Fatalf("a payment resolved as failed must be returned: %d", e.balance(t, tok, a))
-	}
-	assertLedger(t)
-}
-
-func TestUPIValidationAndOwnership(t *testing.T) {
-	e := setup(t)
-	ta, _, _ := e.signUp(t, "asha@example.com")
-	tb, _, _ := e.signUp(t, "ravi@example.com")
-	a := e.newAccount(t, ta, "A", "savings", 1000)
-	b := e.newAccount(t, tb, "B", "savings", 1000)
-	for name, body := range map[string]map[string]any{
-		"bad vpa":     {"account_id": a, "payee_vpa": "not a vpa", "amount": 100},
-		"no at":       {"account_id": a, "payee_vpa": "swiggy", "amount": 100},
-		"zero amount": {"account_id": a, "payee_vpa": "x@y", "amount": 0},
-		"foreign":     {"account_id": b, "payee_vpa": "swiggy@icici", "amount": 100},
-		"no account":  {"payee_vpa": "swiggy@icici", "amount": 100},
-	} {
-		if r := e.call(t, "POST", "/v1/upi/payments", ta, "", body); r.Status != 422 {
-			t.Errorf("%s: want 422 got %d", name, r.Status)
-		}
-	}
-	id := e.startUPI(t, ta, a, 100)
-	for _, c := range []struct{ m, p string }{{"GET", "/v1/upi/payments/" + id}, {"POST", "/v1/upi/payments/" + id + "/handoff"}} {
-		if r := e.call(t, c.m, c.p, tb, "", nil); r.Status != 404 {
-			t.Errorf("%s by another user: %d", c.m, r.Status)
-		}
-	}
-	if r := e.call(t, "POST", "/v1/upi/payments/"+id+"/outcome", tb, newKey(), map[string]any{"outcome": "paid"}); r.Status != 404 {
-		t.Fatalf("outcome by another user: %d", r.Status)
-	}
-	if r := e.call(t, "POST", "/v1/upi/payments/"+id+"/outcome", ta, "", map[string]any{"outcome": "paid"}); r.Status != 400 {
-		t.Fatalf("outcome needs an idempotency key: %d", r.Status)
-	}
-	if r := e.call(t, "POST", "/v1/upi/payments/"+id+"/outcome", ta, newKey(), map[string]any{"outcome": "maybe"}); r.Status != 422 {
-		t.Fatalf("bad outcome: %d", r.Status)
-	}
 }
 
 // ---- bank SMS ----
@@ -829,7 +696,7 @@ func TestSMSNeverAutoAssignsAnAccount(t *testing.T) {
 	}
 }
 
-func TestSMSMatchesExistingTransactionsAndUPI(t *testing.T) {
+func TestSMSMatchesExistingTransactions(t *testing.T) {
 	e := setup(t)
 	tok, _, _ := e.signUp(t, "asha@example.com")
 	a := str(e.call(t, "POST", "/v1/accounts", tok, newKey(), map[string]any{"name": "HDFC", "type": "savings", "opening_balance": 1000000, "masked_identifier": "4821"}).data(), "id")
@@ -847,35 +714,6 @@ func TestSMSMatchesExistingTransactionsAndUPI(t *testing.T) {
 	other := e.sms(t, tok, map[string]any{"amount": 99900, "merchant": "Zomato", "reference": "R7"})
 	if str(other.data(), "status") != "review" {
 		t.Fatalf("different amount: %s", other.Raw)
-	}
-	// UPI verification: a paid payment becomes bank verified by a matching debit message.
-	id := e.startUPI(t, tok, a, 31000)
-	e.call(t, "POST", "/v1/upi/payments/"+id+"/handoff", tok, "", nil)
-	o := e.call(t, "POST", "/v1/upi/payments/"+id+"/outcome", tok, newKey(), map[string]any{"outcome": "paid"})
-	if o.data()["bank_verified"] != false {
-		t.Fatal("a user-confirmed payment is not bank verified")
-	}
-	m := e.sms(t, tok, map[string]any{"amount": 31000, "merchant": "SWIGGY", "reference": "UPI9000111"})
-	if str(m.data(), "status") != "linked" || str(m.data(), "transaction_id") != str(o.data(), "transaction_id") {
-		t.Fatalf("bank message should link to the recorded UPI payment: %s", m.Raw)
-	}
-	if p := e.do(t, "GET", "/v1/upi/payments/"+id, tok, nil).data(); p["bank_verified"] != true {
-		t.Fatalf("bank verified only after a matching message: %v", p)
-	}
-	// An uncertain payment is confirmed by the bank's own message.
-	u := e.startUPI(t, tok, a, 4400)
-	un := e.call(t, "POST", "/v1/upi/payments/"+u+"/outcome", tok, newKey(), map[string]any{"outcome": "not_sure"})
-	e.sms(t, tok, map[string]any{"amount": 4400, "merchant": "SWIGGY", "reference": "UPI9000222"})
-	if tx := e.do(t, "GET", "/v1/transactions/"+str(un.data(), "transaction_id"), tok, nil).data(); str(tx, "status") != "confirmed" {
-		t.Fatalf("bank evidence confirms an uncertain payment: %v", tx)
-	}
-	// Two candidate payments with the same amount: never guess.
-	x1, x2 := e.startUPI(t, tok, a, 777), e.startUPI(t, tok, a, 777)
-	e.call(t, "POST", "/v1/upi/payments/"+x1+"/outcome", tok, newKey(), map[string]any{"outcome": "paid"})
-	e.call(t, "POST", "/v1/upi/payments/"+x2+"/outcome", tok, newKey(), map[string]any{"outcome": "paid"})
-	amb := e.sms(t, tok, map[string]any{"amount": 777, "merchant": "Chai", "reference": "UPI9000333"})
-	if str(amb.data(), "status") == "linked" {
-		t.Fatalf("ambiguous match must not link: %s", amb.Raw)
 	}
 	assertLedger(t)
 }

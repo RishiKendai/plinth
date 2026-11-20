@@ -1,4 +1,4 @@
-// Package bankmsg turns bank and UPI messages into reviewable suggestions (CLAUDE.md 3.7).
+// Package bankmsg turns bank messages into reviewable suggestions (CLAUDE.md 3.7).
 //
 // The message is read and parsed ON THE PHONE; only the parsed fields and a hash of the text reach the server, which
 // never receives or stores the message text. Plinth does not read the SMS inbox: the user shares or pastes a message.
@@ -26,7 +26,6 @@ import (
 	"plinth/server/internal/platform/dbx"
 	"plinth/server/internal/platform/ids"
 	"plinth/server/internal/transactions"
-	"plinth/server/internal/upi"
 )
 
 var ErrState = apierr.New(http.StatusConflict, "invalid_state", "That message has already been handled.")
@@ -47,19 +46,17 @@ type Event struct {
 	Status             string    `json:"status"` // review | added | linked | duplicate | dismissed
 	TransactionID      *string   `json:"transaction_id"`
 	DuplicateOf        *string   `json:"duplicate_of"`
-	UPIPaymentID       *string   `json:"upi_payment_id,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 }
 
 type Service struct {
 	db  *pgxpool.Pool
 	txs *transactions.Service
-	upi *upi.Service
 	now func() time.Time
 }
 
-func NewService(db *pgxpool.Pool, txs *transactions.Service, u *upi.Service) *Service {
-	return &Service{db: db, txs: txs, upi: u, now: time.Now}
+func NewService(db *pgxpool.Pool, txs *transactions.Service) *Service {
+	return &Service{db: db, txs: txs, now: time.Now}
 }
 
 const cols = `id::text, sender, received_at, amount, direction, currency, account_hint, merchant, reference, confidence,
@@ -173,17 +170,6 @@ func (s *Service) Ingest(ctx context.Context, userID string, in IngestInput) (Ev
 			}
 		}
 		status, txID, dupOf := "review", (*string)(nil), (*string)(nil)
-		// Layer 1: a UPI payment the user made through Plinth. The bank message verifies it.
-		if in.Direction == "debit" && s.upi != nil {
-			if _, t, ok, err := s.upi.VerifyBySMS(ctx, tx, userID, in.Amount, in.ReceivedAt); err != nil {
-				return err
-			} else if ok {
-				status = "linked"
-				if t != "" {
-					txID = &t
-				}
-			}
-		}
 		// Layer 2: the bank reference already backs a transaction (this app, a CSV import, another message).
 		if status == "review" && len(in.Reference) >= 6 {
 			var t string

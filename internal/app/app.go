@@ -30,7 +30,6 @@ import (
 	"plinth/server/internal/syncapi"
 	"plinth/server/internal/trackers"
 	"plinth/server/internal/transactions"
-	"plinth/server/internal/upi"
 	"plinth/server/internal/users"
 )
 
@@ -86,10 +85,7 @@ func New(d Deps) (http.Handler, *auth.Service) {
 	attachments.NewHandler(attachments.NewService(d.DB, d.Store)).Register(mux, authSvc.Require)
 	catSvc := categories.NewService(d.DB)
 	imports.NewHandler(imports.NewService(d.DB, settingsSvc, catSvc, txSvc)).Register(mux, authSvc.Require)
-	remSvc := reminders.NewService(d.DB, settingsSvc, txSvc)
-	upiSvc := upi.NewService(d.DB, txSvc, remSvc)
-	upi.NewHandler(upiSvc).Register(mux, authSvc.Require)
-	bankmsg.NewHandler(bankmsg.NewService(d.DB, txSvc, upiSvc)).Register(mux, authSvc.Require)
+	bankmsg.NewHandler(bankmsg.NewService(d.DB, txSvc)).Register(mux, authSvc.Require)
 
 	// Phase 5: groups, splits and settlements.
 	groups.NewHandler(groups.NewService(d.DB, settingsSvc, txSvc)).Register(mux, authSvc.Require, limit)

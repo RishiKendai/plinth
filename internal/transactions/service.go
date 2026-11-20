@@ -506,8 +506,8 @@ func (s *Service) VoidInTx(ctx context.Context, tx pgx.Tx, userID, id string) er
 	return audit.Log(ctx, tx, userID, "transaction.voided", map[string]any{"transaction_id": id, "by": "system"})
 }
 
-// ChangeStatusInTx applies a status transition inside the caller's database transaction. Other modules (UPI outcomes,
-// bank-message verification) use it so the transition table and ledger rules stay in one place. It returns the
+// ChangeStatusInTx applies a status transition inside the caller's database transaction. Other modules (for example
+// bank-message handling) use it so the transition table and ledger rules stay in one place. It returns the
 // transaction after the change.
 func (s *Service) ChangeStatusInTx(ctx context.Context, tx pgx.Tx, userID, id, to string) (Transaction, error) {
 	ls, err := legs(ctx, tx, userID, id)

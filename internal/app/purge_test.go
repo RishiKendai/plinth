@@ -26,7 +26,6 @@ func TestAccountPurgeErasesEverythingAfterTheGracePeriodAndKeepsOtherPeoplesData
 	sbi := e.newAccount(t, ta, "SBI", "savings", 500000)
 	e.spend(t, ta, hdfc, 12000, map[string]any{"title": "Lunch"})
 	e.call(t, "POST", "/v1/transfers", ta, newKey(), map[string]any{"from_account_id": hdfc, "to_account_id": sbi, "amount": 5000})
-	e.startUPI(t, ta, hdfc, 2500)
 	e.sms(t, ta, map[string]any{})
 	// A stored receipt.
 	var txID string
