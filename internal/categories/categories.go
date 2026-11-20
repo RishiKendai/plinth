@@ -163,6 +163,10 @@ func (s *Service) Update(ctx context.Context, userID, id string, in UpdateInput)
 	if dbx.PgCode(err) == dbx.UniqueViolation {
 		return Category{}, ErrDup
 	}
+	if err == nil && in.Archived != nil && *in.Archived {
+		// Archiving a category also archives its subcategories, so none is left hanging under a hidden parent.
+		_, err = s.db.Exec(ctx, `UPDATE categories SET archived_at = COALESCE(archived_at, $3) WHERE parent_id=$1 AND user_id=$2`, id, userID, archivedAt)
+	}
 	return c, err
 }
 

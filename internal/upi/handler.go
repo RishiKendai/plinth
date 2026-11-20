@@ -18,6 +18,7 @@ func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.H
 	mux.Handle("GET /v1/upi/payments/{id}", r(h.get))
 	mux.Handle("POST /v1/upi/payments/{id}/handoff", r(h.handoff))
 	mux.Handle("POST /v1/upi/payments/{id}/outcome", r(h.outcome))
+	mux.Handle("DELETE /v1/upi/payments/{id}", r(h.remove))
 }
 
 func (h *Handler) start(w http.ResponseWriter, rq *http.Request) {
@@ -107,4 +108,21 @@ func (h *Handler) outcome(w http.ResponseWriter, rq *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, p)
+}
+
+// remove deletes a payment attempt; ?void_transaction=true also voids the transaction recorded from it.
+func (h *Handler) remove(w http.ResponseWriter, rq *http.Request) {
+	uid, ok := auth.UserID(w, rq)
+	if !ok {
+		return
+	}
+	id, ok := httpx.PathUUID(w, rq, "id")
+	if !ok {
+		return
+	}
+	if err := h.svc.Delete(rq.Context(), uid, id, rq.URL.Query().Get("void_transaction") == "true"); err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	httpx.NoContent(w)
 }

@@ -170,6 +170,30 @@ func (s *Service) List(ctx context.Context, userID string) ([]Payment, error) {
 	return out, rows.Err()
 }
 
+// Delete removes a payment attempt from the list. When voidTransaction is set and a transaction was recorded from it, that
+// transaction is voided (cancelled, or reversed if it was confirmed) in the same database transaction, so the ledger stays explainable.
+// Without it the recorded transaction is kept and only the attempt record goes.
+func (s *Service) Delete(ctx context.Context, userID, id string, voidTransaction bool) error {
+	return pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		p, err := scan(tx.QueryRow(ctx, `SELECT `+cols+` FROM upi_payments WHERE id=$1 AND user_id=$2 FOR UPDATE`, id, userID))
+		if dbx.IsNoRows(err) {
+			return apierr.ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if voidTransaction && p.TransactionID != nil {
+			if err := s.txs.VoidInTx(ctx, tx, userID, *p.TransactionID); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM upi_payments WHERE id=$1 AND user_id=$2`, id, userID); err != nil {
+			return err
+		}
+		return audit.Log(ctx, tx, userID, "upi.deleted", map[string]any{"payment_id": id, "transaction_voided": voidTransaction && p.TransactionID != nil})
+	})
+}
+
 // Handoff notes that the UPI app was opened. It changes no money and records no transaction.
 func (s *Service) Handoff(ctx context.Context, userID, id string) (Payment, error) {
 	p, err := scan(s.db.QueryRow(ctx, `UPDATE upi_payments SET status='handed_off', updated_at=now() WHERE id=$1 AND user_id=$2 AND status IN ('started','handed_off') RETURNING `+cols, id, userID))
