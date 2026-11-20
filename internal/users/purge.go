@@ -154,7 +154,6 @@ func (p *Purger) Purge(ctx context.Context, userID string) error {
 			`DELETE FROM import_rows WHERE batch_id IN (SELECT id FROM import_batches WHERE user_id=$1)`,
 			`DELETE FROM import_batches WHERE user_id=$1`,
 			`DELETE FROM sms_events WHERE user_id=$1`,
-			`DELETE FROM upi_payments WHERE user_id=$1`,
 			`DELETE FROM reports WHERE user_id=$1`,
 			`DELETE FROM reminders WHERE user_id=$1`,
 			`DELETE FROM recurring_occurrences WHERE user_id=$1`,

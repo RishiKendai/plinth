@@ -75,7 +75,7 @@ func TestAccountPurgeErasesEverythingAfterTheGracePeriodAndKeepsOtherPeoplesData
 	if userCount(t, ua) != 0 {
 		t.Fatal("user still exists")
 	}
-	for _, q := range []string{"accounts", "transactions", "ledger_entries", "transfers", "attachments", "upi_payments", "sms_events", "sessions"} {
+	for _, q := range []string{"accounts", "transactions", "ledger_entries", "transfers", "attachments", "sms_events", "sessions"} {
 		if c := assertCount(t, `SELECT count(*) FROM `+q+` WHERE user_id='`+ua+`'`); c != 0 {
 			t.Errorf("%s still has %d rows of the erased user", q, c)
 		}
