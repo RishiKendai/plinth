@@ -36,14 +36,14 @@ const txCols = `t.id::text, t.account_id::text, t.type, t.amount, t.currency, t.
 	CASE WHEN t.transfer_id IS NULL THEN NULL ELSE (SELECT o.account_id::text FROM transactions o WHERE o.transfer_id = t.transfer_id AND o.id <> t.id LIMIT 1) END,
 	t.refund_of::text, t.replaces_id::text, (SELECT r.id::text FROM transactions r WHERE r.replaces_id = t.id LIMIT 1),
 	COALESCE((SELECT array_agg(tg.name ORDER BY lower(tg.name)) FROM transaction_tags tt JOIN tags tg ON tg.id = tt.tag_id WHERE tt.transaction_id = t.id), '{}'::text[]),
-	t.counted_amount, t.history_only, t.version, t.created_at, t.updated_at`
+	t.counted_amount, t.history_only, t.version, t.created_at, t.updated_at, t.deleted_at`
 
 func scanTx(row interface{ Scan(...any) error }) (Transaction, error) {
 	var t Transaction
 	err := row.Scan(&t.ID, &t.AccountID, &t.Type, &t.Amount, &t.Currency, &t.Title, &t.Description, &t.CategoryID,
 		&t.PaymentMethod, &t.PayerName, &t.PayeeName, &t.Status, &t.OccurredAt, &t.PostedAt, &t.Timezone, &t.Notes, &t.Location,
 		&t.Latitude, &t.Longitude, &t.Source, &t.ExternalRef, &t.TransferID, &t.TransferDirection, &t.CounterpartyAccount,
-		&t.RefundOf, &t.ReplacesID, &t.ReplacedBy, &t.Tags, &t.CountedAmount, &t.HistoryOnly, &t.Version, &t.CreatedAt, &t.UpdatedAt)
+		&t.RefundOf, &t.ReplacesID, &t.ReplacedBy, &t.Tags, &t.CountedAmount, &t.HistoryOnly, &t.Version, &t.CreatedAt, &t.UpdatedAt, &t.DeletedAt)
 	t.OccurredAt = t.OccurredAt.UTC()
 	t.CreatedAt, t.UpdatedAt = t.CreatedAt.UTC(), t.UpdatedAt.UTC()
 	if t.PostedAt != nil {
@@ -63,7 +63,11 @@ func load(ctx context.Context, q dbx.Q, userID, id string) (Transaction, error) 
 }
 
 func (s *Service) Get(ctx context.Context, userID, id string) (Transaction, error) {
-	return load(ctx, s.db, userID, id)
+	t, err := load(ctx, s.db, userID, id)
+	if err == nil && t.DeletedAt != nil {
+		return Transaction{}, apierr.ErrNotFound // deleted: gone for the user, kept only for the ledger and for sync
+	}
+	return t, err
 }
 
 // prepare runs the checks every new or edited transaction must pass, with the account locked: ownership, not
@@ -388,7 +392,8 @@ func applyStatus(ctx context.Context, tx pgx.Tx, userID string, l Transaction, t
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE transactions SET status=$2, version=version+1, updated_at=now(),
-		posted_at = CASE WHEN $2 = 'confirmed' THEN COALESCE(posted_at, now()) ELSE posted_at END WHERE id=$1`, l.ID, to); err != nil {
+		voided_from = CASE WHEN $2 IN ('cancelled','reversed') THEN $3 ELSE voided_from END,
+		posted_at = CASE WHEN $2 = 'confirmed' THEN COALESCE(posted_at, now()) ELSE posted_at END WHERE id=$1`, l.ID, to, l.Status); err != nil {
 		return err
 	}
 	switch {
@@ -436,6 +441,108 @@ func (s *Service) Void(ctx context.Context, userID, key, id string) (Transaction
 			}
 		}
 		return audit.Log(ctx, tx, userID, "transaction.voided", map[string]any{"transaction_id": id, "from": ls[0].Status})
+	})
+}
+
+// blockedSources are created and voided by their own module (groups, reconcile). Undoing or deleting them here would put the two out of step.
+var blockedSources = map[string]bool{"group": true, "settlement": true, "topup": true, "reconcile": true}
+
+// Undo restores a voided transaction to what it was before the void (pending, needs review or confirmed). A new ledger entry
+// re-applies its effect; the void's reversing entry stays, so the ledger still explains every balance. Both legs of a transfer
+// are restored together.
+func (s *Service) Undo(ctx context.Context, userID, key, id string) (Transaction, error) {
+	if err := idempotency.Check(key, true); err != nil {
+		return Transaction{}, err
+	}
+	return s.mutate(ctx, userID, key, "transaction.undo", id, "", func(tx pgx.Tx, ls []Transaction) error {
+		for _, l := range ls {
+			if err := restoreLeg(ctx, tx, userID, l); err != nil {
+				return err
+			}
+		}
+		return audit.Log(ctx, tx, userID, "transaction.void_undone", map[string]any{"transaction_id": id})
+	})
+}
+
+func restoreLeg(ctx context.Context, tx pgx.Tx, userID string, l Transaction) error {
+	if l.DeletedAt != nil {
+		return apierr.ErrNotFound
+	}
+	if (l.Status != "cancelled" && l.Status != "reversed") || l.ReplacedBy != nil || blockedSources[l.Source] || l.CountedAmount != nil {
+		return ErrNotRestorable
+	}
+	var from *string
+	var archived bool
+	if err := tx.QueryRow(ctx, `SELECT t.voided_from, a.archived_at IS NOT NULL FROM transactions t JOIN accounts a ON a.id = t.account_id WHERE t.id=$1`, l.ID).Scan(&from, &archived); err != nil {
+		return err
+	}
+	if from == nil {
+		return ErrNotRestorable
+	}
+	if archived {
+		return apierr.New(http.StatusConflict, "account_archived", "This account is archived. Unarchive it first, then undo.")
+	}
+	if l.RefundOf != nil { // a refund can come back only while the payment it refunds is live and still has room for it
+		var orig int64
+		var origStatus string
+		if err := tx.QueryRow(ctx, `SELECT amount, status FROM transactions WHERE id=$1`, *l.RefundOf).Scan(&orig, &origStatus); err != nil {
+			return err
+		}
+		var already int64
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0) FROM transactions WHERE refund_of=$1 AND status IN ('pending','confirmed')`, *l.RefundOf).Scan(&already); err != nil {
+			return err
+		}
+		if !ledger.Counting(origStatus) || already+l.Amount > orig {
+			return ErrNotRestorable
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE transactions SET status=$2, voided_from=NULL, version=version+1,
+		posted_at = CASE WHEN $2 = 'confirmed' THEN COALESCE(posted_at, now()) ELSE posted_at END WHERE id=$1`, l.ID, *from); err != nil {
+		return err
+	}
+	if ledger.Counting(*from) && !l.HistoryOnly {
+		return ledger.Post(ctx, tx, userID, l.AccountID, l.ID, l.Currency, l.Signed(), l.OccurredAt, "movement")
+	}
+	return nil
+}
+
+// Delete hides a voided (cancelled or reversed) or failed transaction from the user's history, search and exports. It changes no
+// balance: the row and its ledger entries are kept, because the ledger is append-only and they net to zero. A transaction that is
+// part of a correction, a share or a group cannot be deleted. Both legs of a transfer go together.
+func (s *Service) Delete(ctx context.Context, userID, key, id string) error {
+	if err := idempotency.Check(key, true); err != nil {
+		return err
+	}
+	return pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		replay, err := idempotency.Begin(ctx, tx, userID, key, "transaction.delete", idempotency.Hash("transaction.delete", []string{id}))
+		if err != nil {
+			return err
+		}
+		if replay != nil {
+			return nil
+		}
+		ls, err := legs(ctx, tx, userID, id)
+		if err != nil {
+			return err
+		}
+		for _, l := range ls {
+			if l.DeletedAt != nil {
+				return apierr.ErrNotFound
+			}
+			closed := l.Status == "failed" || l.Status == "cancelled" || l.Status == "reversed"
+			if !closed || l.ReplacedBy != nil || l.ReplacesID != nil || blockedSources[l.Source] || l.CountedAmount != nil {
+				return ErrNotDeletable
+			}
+		}
+		for _, l := range ls {
+			if _, err := tx.Exec(ctx, `UPDATE transactions SET deleted_at=now(), version=version+1 WHERE id=$1`, l.ID); err != nil {
+				return err
+			}
+		}
+		if err := audit.Log(ctx, tx, userID, "transaction.deleted", map[string]any{"transaction_id": id, "status": ls[0].Status}); err != nil {
+			return err
+		}
+		return idempotency.Complete(ctx, tx, userID, key, "transaction", id)
 	})
 }
 

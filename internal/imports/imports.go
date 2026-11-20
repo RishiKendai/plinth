@@ -920,7 +920,7 @@ func (s *Service) Export(ctx context.Context, userID string, p ExportParams, w i
 			a.name, t.type, t.transfer_direction, t.status, t.amount, t.currency, t.title, COALESCE(c.name,''), t.payment_method, t.payee_name, t.notes,
 			COALESCE((SELECT string_agg(g.name, ', ' ORDER BY lower(g.name)) FROM transaction_tags x JOIN tags g ON g.id = x.tag_id WHERE x.transaction_id = t.id),''), t.external_ref, t.source
 			FROM transactions t JOIN accounts a ON a.id = t.account_id LEFT JOIN categories c ON c.id = t.category_id
-			WHERE t.user_id=$1 AND ($2::uuid IS NULL OR t.account_id=$2) AND ($3::timestamptz IS NULL OR t.occurred_at >= $3) AND ($4::timestamptz IS NULL OR t.occurred_at < $4)
+			WHERE t.user_id=$1 AND t.deleted_at IS NULL AND ($2::uuid IS NULL OR t.account_id=$2) AND ($3::timestamptz IS NULL OR t.occurred_at >= $3) AND ($4::timestamptz IS NULL OR t.occurred_at < $4)
 			  AND ($5::timestamptz IS NULL OR (t.occurred_at, t.id) < ($5, $7::uuid))
 			ORDER BY t.occurred_at DESC, t.id DESC LIMIT 500`, userID, acct, from, to, lastAt, tzName, lastID)
 		if err != nil {

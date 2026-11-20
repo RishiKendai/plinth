@@ -179,7 +179,7 @@ func loadTransfer(ctx context.Context, q dbx.Q, userID, id string) (Transfer, er
 		return t, err
 	}
 	t.OccurredAt, t.CreatedAt = t.OccurredAt.UTC(), t.CreatedAt.UTC()
-	rows, err := q.Query(ctx, `SELECT `+txCols+` FROM transactions t WHERE t.transfer_id=$1 AND t.user_id=$2 ORDER BY t.transfer_direction DESC`, id, userID)
+	rows, err := q.Query(ctx, `SELECT `+txCols+` FROM transactions t WHERE t.transfer_id=$1 AND t.user_id=$2 AND t.deleted_at IS NULL ORDER BY t.transfer_direction DESC`, id, userID)
 	if err != nil {
 		return t, err
 	}
@@ -203,7 +203,7 @@ func (s *Service) VoidTransfer(ctx context.Context, userID, key, id string) (Tra
 		return Transfer{}, err
 	}
 	var legID string
-	err := s.db.QueryRow(ctx, `SELECT id::text FROM transactions WHERE transfer_id=$1 AND user_id=$2 ORDER BY id LIMIT 1`, id, userID).Scan(&legID)
+	err := s.db.QueryRow(ctx, `SELECT id::text FROM transactions WHERE transfer_id=$1 AND user_id=$2 AND deleted_at IS NULL ORDER BY id LIMIT 1`, id, userID).Scan(&legID)
 	if dbx.IsNoRows(err) {
 		return Transfer{}, apierr.ErrNotFound
 	}

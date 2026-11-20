@@ -145,7 +145,7 @@ func (s *Service) List(ctx context.Context, userID string, p ListParams) (Page, 
 
 	args := []any{userID}
 	arg := func(v any) string { args = append(args, v); return "$" + strconv.Itoa(len(args)) }
-	where := []string{"t.user_id = $1"}
+	where := []string{"t.user_id = $1", "t.deleted_at IS NULL"} // deleted (hidden) rows never appear in history or search
 	if p.AccountID == "" {
 		where = append(where, "(t.type <> 'transfer' OR t.transfer_direction = 'out')")
 	} else {
@@ -267,8 +267,8 @@ func (s *Service) List(ctx context.Context, userID string, p ListParams) (Page, 
 // (REQUEST_TIMEOUT, 15 s by default) means no row can appear behind the cursor. Docs: docs/sync.md.
 var SyncSettle = 30 * time.Second // a var only so tests can shorten it
 
-// Changes returns transactions changed after the cursor, oldest first, for incremental sync. Rows are never deleted (a
-// void is a status change), so "changed since" is complete. hasMore tells the caller to ask again immediately.
+// Changes returns transactions changed after the cursor, oldest first, for incremental sync. Rows are never removed (a
+// void is a status change and a delete only sets deleted_at, which devices act on), so "changed since" is complete. hasMore tells the caller to ask again immediately.
 func (s *Service) Changes(ctx context.Context, userID, cur string, limit int) (items []Transaction, next string, hasMore bool, err error) {
 	if limit <= 0 || limit > 500 {
 		limit = 200

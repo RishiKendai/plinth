@@ -50,6 +50,8 @@ type Transaction struct {
 	Version     int       `json:"version"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	// DeletedAt is set when a voided transaction was deleted (hidden). Only sync returns such rows, so devices can drop them.
+	DeletedAt *time.Time `json:"deleted_at"`
 }
 
 // Signed returns the effect on the account: negative leaves it.
@@ -86,6 +88,10 @@ var (
 		"This transaction is closed and cannot be edited. Its history is kept.")
 	ErrHasRefunds = apierr.New(http.StatusConflict, "has_refunds",
 		"This payment has refunds recorded against it. Void the refunds first.")
+	ErrNotRestorable = apierr.New(http.StatusConflict, "not_restorable",
+		"This transaction cannot be restored. Record it again instead.")
+	ErrNotDeletable = apierr.New(http.StatusConflict, "not_deletable",
+		"Only a voided or failed transaction can be deleted, and not one that is part of a correction, a share or a group.")
 	ErrCurrency = apierr.Validation(map[string]string{"currency": "Both accounts must use the same currency. Cross-currency transfers are not supported yet."})
 )
 

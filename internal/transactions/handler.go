@@ -23,6 +23,8 @@ func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.H
 	mux.Handle("PUT /v1/transactions/{id}", r(h.update))
 	mux.Handle("POST /v1/transactions/{id}/void", r(h.void))
 	mux.Handle("POST /v1/transactions/{id}/status", r(h.status))
+	mux.Handle("POST /v1/transactions/{id}/undo", r(h.undo))
+	mux.Handle("DELETE /v1/transactions/{id}", r(h.remove))
 	mux.Handle("GET /v1/accounts/{id}/transactions", r(h.accountList))
 	mux.Handle("POST /v1/accounts/{id}/reconcile", r(h.reconcile))
 	mux.Handle("POST /v1/transfers", r(h.createTransfer))
@@ -324,4 +326,39 @@ func (h *Handler) voidTransfer(w http.ResponseWriter, rq *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, out)
+}
+
+// undo restores a voided transaction.
+func (h *Handler) undo(w http.ResponseWriter, rq *http.Request) {
+	uid, ok := who(w, rq)
+	if !ok {
+		return
+	}
+	id, ok := pathID(w, rq)
+	if !ok {
+		return
+	}
+	out, err := h.svc.Undo(rq.Context(), uid, key(rq), id)
+	if err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, out)
+}
+
+// remove deletes (hides) a voided or failed transaction. The ledger keeps its entries.
+func (h *Handler) remove(w http.ResponseWriter, rq *http.Request) {
+	uid, ok := who(w, rq)
+	if !ok {
+		return
+	}
+	id, ok := pathID(w, rq)
+	if !ok {
+		return
+	}
+	if err := h.svc.Delete(rq.Context(), uid, key(rq), id); err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	httpx.NoContent(w)
 }
