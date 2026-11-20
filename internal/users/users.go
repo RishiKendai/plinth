@@ -61,8 +61,8 @@ func (s *Service) UpdateName(ctx context.Context, userID, name string) (Profile,
 	return s.Get(ctx, userID)
 }
 
-// RequestDeletion records the request after confirming the password. Nothing is erased here: the retention
-// and erasure policy is a product/legal decision that has not been made (CLAUDE.md sections 5.6 and 13.3).
+// RequestDeletion records the request after confirming the password. Nothing is erased here: the account is permanently erased by the
+// worker once the grace period has passed (Purger, docs/account-deletion.md), and signing in and cancelling stops it until then.
 func (s *Service) RequestDeletion(ctx context.Context, userID, password string) (Profile, error) {
 	if err := s.verifier.VerifyPassword(ctx, userID, password); err != nil {
 		return Profile{}, err

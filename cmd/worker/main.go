@@ -20,6 +20,7 @@ import (
 	"plinth/server/internal/platform/storage"
 	"plinth/server/internal/recurrence"
 	"plinth/server/internal/settings"
+	"plinth/server/internal/users"
 )
 
 var version = "dev"
@@ -97,11 +98,21 @@ func run() error {
 			log.Info("reports generated", "count", n)
 		}
 	}
+	purger := users.NewPurger(db, objectStore(store), log)
+	eraseDue := func() {
+		jctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		defer cancel()
+		if n, err := purger.PurgeDue(jctx, cfg.AccountDeletionGrace, 20); err != nil {
+			log.Error("account purge sweep failed", "err", err.Error())
+		} else if n > 0 {
+			log.Info("accounts erased", "count", n)
+		}
+	}
 	log.Info("worker started", "version", version)
-	purge()
 	generate()
 	cleanup()
 	reports()
+	eraseDue()
 	tick := time.NewTicker(time.Hour)
 	defer tick.Stop()
 	fast := time.NewTicker(time.Minute)
@@ -115,8 +126,17 @@ func run() error {
 			reports()
 		case <-tick.C:
 			purge()
+			eraseDue()
 			generate()
 			cleanup()
 		}
 	}
+}
+
+// objectStore turns a possibly-nil storage.Store into an interface that is truly nil when R2 is not configured.
+func objectStore(s storage.Store) users.ObjectStore {
+	if s == nil {
+		return nil
+	}
+	return s
 }
