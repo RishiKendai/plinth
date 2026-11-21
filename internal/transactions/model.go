@@ -45,6 +45,11 @@ type Transaction struct {
 	Tags                []string   `json:"tags"`
 	// CountedAmount is the part that counts as the user's own spending (budgets, trackers). Null means all of it.
 	CountedAmount *int64 `json:"counted_amount"`
+	// GroupID, GroupName and GroupKind say which group (or split) this transaction is currently in; all null means it is a common transaction,
+	// in no group. A transaction is in at most one group at a time.
+	GroupID   *string `json:"group_id"`
+	GroupName *string `json:"group_name"`
+	GroupKind *string `json:"group_kind"`
 	// HistoryOnly means no ledger entry exists: the transaction does not change the account balance (docs/balance-rules.md).
 	HistoryOnly bool      `json:"history_only"`
 	Version     int       `json:"version"`

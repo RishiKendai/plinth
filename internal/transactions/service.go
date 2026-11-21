@@ -35,14 +35,18 @@ const txCols = `t.id::text, t.account_id::text, t.type, t.amount, t.currency, t.
 	CASE WHEN t.transfer_id IS NULL THEN NULL ELSE (SELECT o.account_id::text FROM transactions o WHERE o.transfer_id = t.transfer_id AND o.id <> t.id LIMIT 1) END,
 	t.refund_of::text, t.replaces_id::text, (SELECT r.id::text FROM transactions r WHERE r.replaces_id = t.id LIMIT 1),
 	COALESCE((SELECT array_agg(tg.name ORDER BY lower(tg.name)) FROM transaction_tags tt JOIN tags tg ON tg.id = tt.tag_id WHERE tt.transaction_id = t.id), '{}'::text[]),
-	t.counted_amount, t.history_only, t.version, t.created_at, t.updated_at, t.deleted_at`
+	t.counted_amount,
+	(SELECT g.id::text FROM group_expenses ge JOIN groups g ON g.id = ge.group_id WHERE ge.transaction_id = t.id AND ge.voided_at IS NULL),
+	(SELECT g.name FROM group_expenses ge JOIN groups g ON g.id = ge.group_id WHERE ge.transaction_id = t.id AND ge.voided_at IS NULL),
+	(SELECT g.kind FROM group_expenses ge JOIN groups g ON g.id = ge.group_id WHERE ge.transaction_id = t.id AND ge.voided_at IS NULL),
+	t.history_only, t.version, t.created_at, t.updated_at, t.deleted_at`
 
 func scanTx(row interface{ Scan(...any) error }) (Transaction, error) {
 	var t Transaction
 	err := row.Scan(&t.ID, &t.AccountID, &t.Type, &t.Amount, &t.Currency, &t.Title, &t.Description, &t.CategoryID,
 		&t.PaymentMethod, &t.PayerName, &t.PayeeName, &t.Status, &t.OccurredAt, &t.PostedAt, &t.Timezone, &t.Notes, &t.Location,
 		&t.Latitude, &t.Longitude, &t.Source, &t.ExternalRef, &t.TransferID, &t.TransferDirection, &t.CounterpartyAccount,
-		&t.RefundOf, &t.ReplacesID, &t.ReplacedBy, &t.Tags, &t.CountedAmount, &t.HistoryOnly, &t.Version, &t.CreatedAt, &t.UpdatedAt, &t.DeletedAt)
+		&t.RefundOf, &t.ReplacesID, &t.ReplacedBy, &t.Tags, &t.CountedAmount, &t.GroupID, &t.GroupName, &t.GroupKind, &t.HistoryOnly, &t.Version, &t.CreatedAt, &t.UpdatedAt, &t.DeletedAt)
 	t.OccurredAt = t.OccurredAt.UTC()
 	t.CreatedAt, t.UpdatedAt = t.CreatedAt.UTC(), t.UpdatedAt.UTC()
 	if t.PostedAt != nil {

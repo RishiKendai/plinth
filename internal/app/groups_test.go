@@ -795,12 +795,19 @@ func TestMovingATransactionBetweenGroups(t *testing.T) {
 	into := func(g, me, other string, move bool) resp {
 		return e.groupExpense(t, tok, g, map[string]any{"title": "Dinner", "amount": 30000, "split_method": "equal", "participants": parts(me, 0, other, 0), "transaction_id": txID, "move": move})
 	}
+	groupOf := func() any { return e.do(t, "GET", "/v1/transactions/"+txID, tok, nil).data()["group_name"] }
+	if groupOf() != nil {
+		t.Fatalf("a transaction in no group is common (null group), got %v", groupOf())
+	}
 	// From the main list into a group.
 	first := into(gA, meA, bA, false)
 	if first.Status != 201 {
 		t.Fatalf("add to the first group: %d %s", first.Status, first.Raw)
 	}
 	firstExp := str(first.data(), "id")
+	if groupOf() != "Goa trip" {
+		t.Fatalf("the transaction should say which group it is in: %v", groupOf())
+	}
 	// Into a second group without saying "move": refused, nothing changes.
 	if r := into(gB, meB, bB, false); r.Status != 409 || r.errCode() != "already_shared" {
 		t.Fatalf("second group without move: %d %s", r.Status, r.Raw)
@@ -822,6 +829,13 @@ func TestMovingATransactionBetweenGroups(t *testing.T) {
 	}
 	if m := e.members(t, tok, gB); i64(m[meB], "net") != 15000 || i64(m[bB], "net") != -15000 {
 		t.Fatalf("the second group's balances: %v", m)
+	}
+	if groupOf() != "Flat" {
+		t.Fatalf("after the move the transaction should say Flat: %v", groupOf())
+	}
+	// The history list carries it too.
+	if raw := e.do(t, "GET", "/v1/transactions", tok, nil).Raw; !strings.Contains(string(raw), `"group_name":"Flat"`) {
+		t.Fatalf("the list should carry the group name: %s", raw)
 	}
 	si := e.do(t, "GET", "/v1/transactions/"+txID+"/share", tok, nil).data()
 	if str(si, "group_id") != gB || i64(si, "my_share") != 15000 {
