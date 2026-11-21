@@ -122,6 +122,9 @@ func (s *Store) authenticate(ctx context.Context, accessHash []byte, now time.Ti
 var ErrUnauthenticated = errors.New("unauthenticated")
 var errRefreshReuse = errors.New("refresh token reuse")
 
+// refreshRetryWindow is how soon after a rotation the previous refresh token may still be presented once more without it counting as reuse.
+const refreshRetryWindow = 2 * time.Minute
+
 type rotation struct {
 	OldRefreshHash, NewAccessHash, NewRefreshHash []byte
 	AccessExpires, RefreshExpires, Now            time.Time
@@ -135,7 +138,17 @@ func (s *Store) rotate(ctx context.Context, r rotation) (userID, sessionID strin
 			WHERE refresh_hash = $1 AND revoked_at IS NULL AND refresh_expires_at > $2 FOR UPDATE`, r.OldRefreshHash, r.Now).Scan(&sessionID, &userID)
 		if errors.Is(qerr, pgx.ErrNoRows) {
 			var id, uid string
-			perr := tx.QueryRow(ctx, `SELECT id, user_id FROM sessions WHERE prev_refresh_hash = $1 AND revoked_at IS NULL`, r.OldRefreshHash).Scan(&id, &uid)
+			var rotatedAt time.Time
+			perr := tx.QueryRow(ctx, `SELECT id, user_id, rotated_at FROM sessions WHERE prev_refresh_hash = $1 AND revoked_at IS NULL FOR UPDATE`, r.OldRefreshHash).Scan(&id, &uid, &rotatedAt)
+			if perr == nil && r.Now.Sub(rotatedAt) <= refreshRetryWindow {
+				// The reply to the last refresh was probably lost on the way (a dropped connection), so the app asks again with the token it
+				// still has. That is not theft: hand out a fresh pair and keep the person signed in. Reuse long after the rotation still ends it.
+				sessionID, userID = id, uid
+				_, e := tx.Exec(ctx, `UPDATE sessions SET access_hash=$2, refresh_hash=$3, prev_refresh_hash=$4,
+					access_expires_at=$5, refresh_expires_at=$6, last_used_at=$7, rotated_at=$7 WHERE id=$1`,
+					sessionID, r.NewAccessHash, r.NewRefreshHash, r.OldRefreshHash, r.AccessExpires, r.RefreshExpires, r.Now)
+				return e
+			}
 			if perr == nil {
 				if _, e := tx.Exec(ctx, `UPDATE sessions SET revoked_at = $2 WHERE id = $1`, id, r.Now); e != nil {
 					return e
@@ -152,7 +165,7 @@ func (s *Store) rotate(ctx context.Context, r rotation) (userID, sessionID strin
 			return qerr
 		}
 		_, e := tx.Exec(ctx, `UPDATE sessions SET access_hash=$2, refresh_hash=$3, prev_refresh_hash=$4,
-			access_expires_at=$5, refresh_expires_at=$6, last_used_at=$7 WHERE id=$1`,
+			access_expires_at=$5, refresh_expires_at=$6, last_used_at=$7, rotated_at=$7 WHERE id=$1`,
 			sessionID, r.NewAccessHash, r.NewRefreshHash, r.OldRefreshHash, r.AccessExpires, r.RefreshExpires, r.Now)
 		return e
 	})
@@ -215,8 +228,9 @@ func (s *Store) changePassword(ctx context.Context, userID, newHash, keepSession
 	})
 }
 
-// Purge removes expired sessions. Called by the worker.
+// Purge removes sessions that were signed out more than 30 days ago. A signed-in session never expires, so nothing else is removed.
+// Called by the worker.
 func (s *Store) Purge(ctx context.Context, now time.Time) (sessions int64, err error) {
-	ss, err := s.db.Exec(ctx, `DELETE FROM sessions WHERE refresh_expires_at < $1 OR revoked_at < $2`, now.Add(-7*24*time.Hour), now.Add(-30*24*time.Hour))
+	ss, err := s.db.Exec(ctx, `DELETE FROM sessions WHERE revoked_at < $1`, now.Add(-30*24*time.Hour))
 	return ss.RowsAffected(), err
 }

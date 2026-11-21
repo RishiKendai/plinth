@@ -24,6 +24,10 @@ const (
 	maxPasswordLen  = 128
 )
 
+// SessionLifetime is how long a sign-in lasts: effectively forever. A person stays signed in until they sign out (or change their
+// password, which signs out the other devices). The short access token is renewed in the background with the refresh token.
+const SessionLifetime = 10 * 365 * 24 * time.Hour
+
 type Config struct {
 	Pepper                []byte
 	AccessTTL, RefreshTTL time.Duration

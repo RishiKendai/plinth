@@ -9,7 +9,7 @@ import (
 func valid() Config {
 	return Config{
 		Env: "development", DatabaseURL: "postgresql://u:p@host/db", DBMaxConns: 5,
-		TokenPepper: []byte(strings.Repeat("a", 32)), AccessTokenTTL: time.Minute, RefreshTokenTTL: time.Hour,
+		TokenPepper: []byte(strings.Repeat("a", 32)), AccessTokenTTL: time.Minute,
 	}
 }
 

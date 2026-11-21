@@ -28,10 +28,9 @@ type Config struct {
 	DBMaxConns           int32
 	DBUsePooler          bool
 
-	TokenPepper     []byte
-	AccessTokenTTL  time.Duration
-	RefreshTokenTTL time.Duration
-	RequestTimeout  time.Duration
+	TokenPepper    []byte
+	AccessTokenTTL time.Duration
+	RequestTimeout time.Duration
 
 	R2 R2 // used from Phase 4; loaded now so configuration is in one place
 }
@@ -65,7 +64,6 @@ func Load() (Config, error) {
 		DBUsePooler:          boolean("DB_USE_POOLER", true),
 		TokenPepper:          []byte(str("TOKEN_PEPPER", "")),
 		AccessTokenTTL:       duration("ACCESS_TOKEN_TTL", 15*time.Minute),
-		RefreshTokenTTL:      duration("REFRESH_TOKEN_TTL", 720*time.Hour),
 		RequestTimeout:       duration("REQUEST_TIMEOUT", 15*time.Second),
 		R2: R2{
 			AccountID: str("R2_ACCOUNT_ID", ""), AccessKeyID: str("R2_ACCESS_KEY_ID", ""),
@@ -91,8 +89,8 @@ func (c Config) Validate() error {
 	if c.DBMaxConns < 1 {
 		errs = append(errs, errors.New("DB_MAX_CONNS must be at least 1"))
 	}
-	if c.AccessTokenTTL <= 0 || c.RefreshTokenTTL <= c.AccessTokenTTL {
-		errs = append(errs, errors.New("token TTLs must be positive and REFRESH_TOKEN_TTL must exceed ACCESS_TOKEN_TTL"))
+	if c.AccessTokenTTL <= 0 {
+		errs = append(errs, errors.New("ACCESS_TOKEN_TTL must be positive"))
 	}
 	return errors.Join(errs...)
 }

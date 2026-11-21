@@ -622,6 +622,9 @@ type ExpenseInput struct {
 	// TransactionID shares an existing personal expense of the caller instead of creating one: its amount must equal the expense, the
 	// caller must be the payer, and from then on only the caller's own share counts as spending (counted_amount).
 	TransactionID string `json:"transaction_id"`
+	// Move lets TransactionID be taken out of the group (or split) it is already shared in and put into this one, in a single step. Without
+	// it a transaction that is already shared is refused (409 already_shared) so nothing is moved by accident.
+	Move bool `json:"move"`
 }
 
 // ComputeShares validates participants against a group and runs the split engine.
@@ -791,18 +794,39 @@ func (s *Service) addExpenseInTx(ctx context.Context, tx pgx.Tx, userID, groupID
 		case typ != "expense" || (tstatus != "pending" && tstatus != "confirmed"):
 			return bad("Only a recorded expense can be shared.")
 		case tsource == "group" || tsource == "settlement":
-			return bad("That transaction already belongs to a group.")
+			return bad("That was recorded inside a group, so it cannot be added to another one. Void it there and add it again.")
 		case tcur != cur:
 			return bad("That transaction uses " + tcur + " but the group uses " + cur + ".")
 		case tamount != in.Amount:
 			return bad("The shared amount must equal the transaction's amount.")
 		}
-		var shared bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM group_expenses WHERE transaction_id=$1 AND voided_at IS NULL)`, tid).Scan(&shared); err != nil {
-			return err
-		}
-		if shared {
-			return apierr.New(http.StatusConflict, "already_shared", "This transaction is already shared. Void the share first to share it somewhere else.")
+		// A transaction backs at most one live share, so it is never counted in two groups. To put it somewhere else it must be moved:
+		// its share in the other group is voided here, in the same database transaction, and the new share is recorded below.
+		var oldExp, oldGroup, oldName string
+		oerr := tx.QueryRow(ctx, `SELECT e.id::text, e.group_id::text, g.name FROM group_expenses e JOIN groups g ON g.id=e.group_id
+			WHERE e.transaction_id=$1 AND e.voided_at IS NULL FOR UPDATE OF e`, tid).Scan(&oldExp, &oldGroup, &oldName)
+		switch {
+		case dbx.IsNoRows(oerr):
+			// not shared anywhere: nothing to move
+		case oerr != nil:
+			return oerr
+		case oldGroup == groupID:
+			return apierr.New(http.StatusConflict, "already_shared", "This transaction is already in this group.")
+		case !in.Move:
+			return apierr.New(http.StatusConflict, "already_shared", "This transaction is already in \""+oldName+"\". Move it here to take it out of there.")
+		default:
+			if _, _, err := me(ctx, tx, userID, oldGroup); err != nil {
+				return apierr.New(http.StatusConflict, "already_shared", "This transaction is shared in a group you are no longer part of, so it cannot be moved.")
+			}
+			if _, oldArchived, err := s.groupMeta(ctx, tx, oldGroup); err != nil {
+				return err
+			} else if oldArchived {
+				return apierr.New(http.StatusConflict, "already_shared", "This transaction is in \""+oldName+"\", which is archived and read-only, so it cannot be moved.")
+			}
+			// Only the share is voided; the personal transaction and the balance are untouched (counted_amount is set again just below).
+			if _, err := tx.Exec(ctx, `UPDATE group_expenses SET voided_at=now() WHERE id=$1 AND voided_at IS NULL`, oldExp); err != nil {
+				return err
+			}
 		}
 		var mine int64
 		for _, sh := range shares {

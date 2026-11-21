@@ -47,7 +47,7 @@ const maxBody = 1 << 20 // 1 MiB; uploads go direct to R2 via presigned URLs
 // New builds the service graph and returns the root handler.
 func New(d Deps) (http.Handler, *auth.Service) {
 	authSvc := auth.NewService(auth.NewStore(d.DB), d.Hasher,
-		auth.Config{Pepper: d.Config.TokenPepper, AccessTTL: d.Config.AccessTokenTTL, RefreshTTL: d.Config.RefreshTokenTTL}, d.Log)
+		auth.Config{Pepper: d.Config.TokenPepper, AccessTTL: d.Config.AccessTokenTTL, RefreshTTL: auth.SessionLifetime}, d.Log)
 
 	// 20 requests/minute per IP with a burst of 10 on credential endpoints.
 	limit := httpx.NewRateLimiter(20, 10).Middleware(d.Config.TrustProxy)

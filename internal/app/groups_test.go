@@ -1,6 +1,9 @@
 package app_test
 
 import (
+	"context"
+	"time"
+
 	"strings"
 	"testing"
 )
@@ -777,4 +780,63 @@ func TestAGroupWithOtherPlintUsersCannotBeDeleted(t *testing.T) {
 	if r := e.call(t, "DELETE", "/v1/groups/"+gid, ta, "", nil); r.Status != 204 {
 		t.Fatalf("delete after removing them: %d %s", r.Status, r.Raw)
 	}
+}
+
+// A transaction can be put into a group from the main list, and moved out of another group, but never counted in two at once.
+func TestMovingATransactionBetweenGroups(t *testing.T) {
+	e := setup(t)
+	tok, _, _ := e.signUp(t, "asha@example.com")
+	acct := e.newAccount(t, tok, "HDFC", "savings", 1000000)
+	gA, meA := e.newGroup(t, tok, "Goa trip")
+	bA := e.addPerson(t, tok, gA, "Ben")
+	gB, meB := e.newGroup(t, tok, "Flat")
+	bB := e.addPerson(t, tok, gB, "Cara")
+	txID := str(e.spend(t, tok, acct, 30000, map[string]any{"title": "Dinner"}).data(), "id")
+	into := func(g, me, other string, move bool) resp {
+		return e.groupExpense(t, tok, g, map[string]any{"title": "Dinner", "amount": 30000, "split_method": "equal", "participants": parts(me, 0, other, 0), "transaction_id": txID, "move": move})
+	}
+	// From the main list into a group.
+	first := into(gA, meA, bA, false)
+	if first.Status != 201 {
+		t.Fatalf("add to the first group: %d %s", first.Status, first.Raw)
+	}
+	firstExp := str(first.data(), "id")
+	// Into a second group without saying "move": refused, nothing changes.
+	if r := into(gB, meB, bB, false); r.Status != 409 || r.errCode() != "already_shared" {
+		t.Fatalf("second group without move: %d %s", r.Status, r.Raw)
+	}
+	if m := e.members(t, tok, gA); i64(m[meA], "net") != 15000 {
+		t.Fatalf("the refused move changed the first group: %v", m)
+	}
+	// Into the group it is already in: refused even with move.
+	if r := into(gA, meA, bA, true); r.Status != 409 {
+		t.Fatalf("moving into the same group: %d %s", r.Status, r.Raw)
+	}
+	// Move: out of the first group, into the second, in one step.
+	moved := into(gB, meB, bB, true)
+	if moved.Status != 201 {
+		t.Fatalf("move: %d %s", moved.Status, moved.Raw)
+	}
+	if m := e.members(t, tok, gA); i64(m[meA], "net") != 0 || i64(m[bA], "net") != 0 {
+		t.Fatalf("the first group still owes after the move: %v", m)
+	}
+	if m := e.members(t, tok, gB); i64(m[meB], "net") != 15000 || i64(m[bB], "net") != -15000 {
+		t.Fatalf("the second group's balances: %v", m)
+	}
+	si := e.do(t, "GET", "/v1/transactions/"+txID+"/share", tok, nil).data()
+	if str(si, "group_id") != gB || i64(si, "my_share") != 15000 {
+		t.Fatalf("the transaction should now be shared only in the second group: %v", si)
+	}
+	// The money never moved: balance unchanged, still one transaction, and still counted once (my half).
+	if e.balance(t, tok, acct) != 970000 || countTx(t) != 1 {
+		t.Fatalf("a move must not change money: balance %d, transactions %d", e.balance(t, tok, acct), countTx(t))
+	}
+	var live int
+	_ = pool.QueryRow(context.Background(), `SELECT count(*) FROM group_expenses WHERE transaction_id=$1 AND voided_at IS NULL`, txID).Scan(&live)
+	var old *time.Time
+	_ = pool.QueryRow(context.Background(), `SELECT voided_at FROM group_expenses WHERE id=$1`, firstExp).Scan(&old)
+	if live != 1 || old == nil {
+		t.Fatalf("exactly one live share expected: live=%d, old voided=%v", live, old != nil)
+	}
+	assertLedger(t)
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plinth/server/internal/app"
+	"plinth/server/internal/auth"
 	"plinth/server/internal/platform/config"
 	"plinth/server/internal/platform/security"
 	"plinth/server/internal/platform/storage"
@@ -51,7 +52,7 @@ func setupConfigured(t *testing.T, withStorage bool, mod func(*config.Config)) *
 	t.Helper()
 	testdb.Truncate(t, pool)
 	cfg := config.Config{Env: "development", TokenPepper: []byte(strings.Repeat("p", 32)),
-		AccessTokenTTL: 15 * time.Minute, RefreshTokenTTL: time.Hour, RequestTimeout: 10 * time.Second}
+		AccessTokenTTL: 15 * time.Minute, RequestTimeout: 10 * time.Second}
 	if mod != nil {
 		mod(&cfg)
 	}
@@ -231,16 +232,30 @@ func TestRefreshRotationAndReuseDetection(t *testing.T) {
 	if e.do(t, "GET", "/v1/users/me", access2, nil).Status != 200 {
 		t.Fatal("new access token must work")
 	}
-	// Replaying the old refresh token is theft evidence: the session must die.
+	// The reply to a refresh can be lost, so the app asks again with the token it still has. Within a couple of minutes that is allowed
+	// and gives a fresh pair; the person is not signed out.
+	r = e.do(t, "POST", "/v1/auth/refresh", "", map[string]any{"refresh_token": refresh1})
+	if r.Status != 200 {
+		t.Fatalf("a retry just after a rotation must work, got %d %s", r.Status, r.Raw)
+	}
+	access3, refresh3 := str(r.data(), "access_token"), str(r.data(), "refresh_token")
+	if e.do(t, "GET", "/v1/users/me", access3, nil).Status != 200 {
+		t.Fatal("the pair from the retry must work")
+	}
+	// Replaying the old refresh token later is theft evidence: the session must die.
+	if _, err := pool.Exec(context.Background(), `UPDATE sessions SET rotated_at = now() - interval '10 minutes'`); err != nil {
+		t.Fatal(err)
+	}
 	if r := e.do(t, "POST", "/v1/auth/refresh", "", map[string]any{"refresh_token": refresh1}); r.Status != 401 {
 		t.Fatalf("reuse must be 401, got %d", r.Status)
 	}
-	if e.do(t, "GET", "/v1/users/me", access2, nil).Status != 401 {
+	if e.do(t, "GET", "/v1/users/me", access3, nil).Status != 401 {
 		t.Fatal("session must be revoked after refresh reuse")
 	}
-	if e.do(t, "POST", "/v1/auth/refresh", "", map[string]any{"refresh_token": refresh2}).Status != 401 {
+	if e.do(t, "POST", "/v1/auth/refresh", "", map[string]any{"refresh_token": refresh3}).Status != 401 {
 		t.Fatal("rotated-away session must stay revoked")
 	}
+	_ = refresh2
 }
 
 func TestExpiredAccessTokenRejected(t *testing.T) {
@@ -387,5 +402,32 @@ func TestSecurityHeadersAndNoStore(t *testing.T) {
 	defer res.Body.Close()
 	if res.Header.Get("X-Content-Type-Options") != "nosniff" || res.Header.Get("Cache-Control") != "no-store" || res.Header.Get("X-Request-ID") == "" {
 		t.Fatalf("headers: %v", res.Header)
+	}
+}
+
+// Nobody is signed out for being away: a sign-in has no expiry and the worker only removes sessions that were signed out.
+func TestSignInsNeverExpireAndOnlySignedOutSessionsArePurged(t *testing.T) {
+	e := setup(t)
+	_, refresh, _ := e.signUp(t, "asha@example.com")
+	var expires time.Time
+	if err := pool.QueryRow(context.Background(), `SELECT refresh_expires_at FROM sessions LIMIT 1`).Scan(&expires); err != nil {
+		t.Fatal(err)
+	}
+	if expires.Before(time.Now().AddDate(9, 0, 0)) {
+		t.Fatalf("a sign-in should last years, expires %v", expires)
+	}
+	// Even a session untouched for a year survives the purge and still refreshes.
+	_, _ = pool.Exec(context.Background(), `UPDATE sessions SET last_used_at = now() - interval '400 days'`)
+	n, err := auth.NewStore(pool).Purge(context.Background(), time.Now())
+	if err != nil || n != 0 {
+		t.Fatalf("purge removed %d live sessions (err %v)", n, err)
+	}
+	if r := e.do(t, "POST", "/v1/auth/refresh", "", map[string]any{"refresh_token": refresh}); r.Status != 200 {
+		t.Fatalf("a long-idle session must still refresh: %d %s", r.Status, r.Raw)
+	}
+	// A signed-out session is removed 30 days later.
+	_, _ = pool.Exec(context.Background(), `UPDATE sessions SET revoked_at = now() - interval '31 days'`)
+	if n, _ := auth.NewStore(pool).Purge(context.Background(), time.Now()); n != 1 {
+		t.Fatalf("a long-signed-out session should be removed, got %d", n)
 	}
 }
