@@ -13,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plinth/server/internal/accounts"
-	"plinth/server/internal/audit"
 	"plinth/server/internal/calendar"
 	"plinth/server/internal/categories"
 	"plinth/server/internal/idempotency"
@@ -254,9 +253,6 @@ func (s *Service) Create(ctx context.Context, userID, key string, in Input) (Rem
 			}
 			return err
 		}
-		if err := audit.Log(ctx, tx, userID, "reminder.created", map[string]any{"reminder_id": id}); err != nil {
-			return err
-		}
 		if err := idempotency.Complete(ctx, tx, userID, key, "reminder", id); err != nil {
 			return err
 		}
@@ -347,9 +343,6 @@ func (s *Service) Update(ctx context.Context, userID, id string, in UpdateInput)
 			id, userID, r.title, r.notes, r.amount, r.currency, r.account, r.category, r.tz, r.tod, r.due, r.freq, r.interval); err != nil {
 			return err
 		}
-		if err := audit.Log(ctx, tx, userID, "reminder.updated", map[string]any{"reminder_id": id}); err != nil {
-			return err
-		}
 		out, err = load(ctx, tx, userID, id)
 		return err
 	})
@@ -368,7 +361,7 @@ func (s *Service) Delete(ctx context.Context, userID, id string) error {
 		}
 		return ErrClosed
 	}
-	return audit.Log(ctx, s.db, userID, "reminder.deleted", map[string]any{"reminder_id": id})
+	return nil
 }
 
 // Snooze hides a due reminder until a later time. The due date does not change.
@@ -477,9 +470,6 @@ func (s *Service) Pay(ctx context.Context, userID, key, id string, in PayInput) 
 			_, err = tx.Exec(ctx, `UPDATE reminders SET due_date=$3, last_paid_at=now(), transaction_id=$2, snoozed_until=NULL, version=version+1, updated_at=now() WHERE id=$1`, id, txID, next)
 		}
 		if err != nil {
-			return err
-		}
-		if err := audit.Log(ctx, tx, userID, "reminder.paid", map[string]any{"reminder_id": id, "transaction_id": txID}); err != nil {
 			return err
 		}
 		if err := idempotency.Complete(ctx, tx, userID, key, "reminder", id); err != nil {

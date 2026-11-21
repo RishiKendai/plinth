@@ -8,8 +8,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"plinth/server/internal/audit"
 )
 
 type Store struct{ db *pgxpool.Pool }
@@ -51,7 +49,7 @@ func (s *Store) createUser(ctx context.Context, email, hash, name string) (*user
 		if _, err = tx.Exec(ctx, `INSERT INTO user_settings (user_id) VALUES ($1)`, u.ID); err != nil {
 			return err
 		}
-		return audit.Log(ctx, tx, u.ID, "user.signed_up", nil)
+		return nil
 	})
 	var pe *pgconn.PgError
 	if errors.As(err, &pe) && pe.Code == "23505" {
@@ -142,9 +140,6 @@ func (s *Store) rotate(ctx context.Context, r rotation) (userID, sessionID strin
 				if _, e := tx.Exec(ctx, `UPDATE sessions SET revoked_at = $2 WHERE id = $1`, id, r.Now); e != nil {
 					return e
 				}
-				if e := audit.Log(ctx, tx, uid, "session.refresh_reuse_detected", map[string]any{"session_id": id}); e != nil {
-					return e
-				}
 				reuse = true
 				return nil // commit the revocation
 			}
@@ -216,12 +211,8 @@ func (s *Store) changePassword(ctx context.Context, userID, newHash, keepSession
 		if err := setPassword(ctx, tx, userID, newHash, keepSession, now); err != nil {
 			return err
 		}
-		return audit.Log(ctx, tx, userID, "user.password_changed", nil)
+		return nil
 	})
-}
-
-func (s *Store) audit(ctx context.Context, userID, event string, meta map[string]any) {
-	_ = audit.Log(ctx, s.db, userID, event, meta)
 }
 
 // Purge removes expired sessions. Called by the worker.

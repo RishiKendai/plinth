@@ -7,7 +7,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"plinth/server/internal/accounts"
-	"plinth/server/internal/audit"
 	"plinth/server/internal/idempotency"
 	"plinth/server/internal/ledger"
 	"plinth/server/internal/platform/apierr"
@@ -152,9 +151,6 @@ func (s *Service) CreateTransfer(ctx context.Context, userID, key string, in Tra
 				return err
 			}
 		}
-		if err := audit.Log(ctx, tx, userID, "transfer.created", map[string]any{"transfer_id": id, "from": from, "to": to}); err != nil {
-			return err
-		}
 		if err := idempotency.Complete(ctx, tx, userID, key, "transfer", id); err != nil {
 			return err
 		}
@@ -285,9 +281,6 @@ func (s *Service) Reconcile(ctx context.Context, userID, key, accountID string, 
 			resource, resourceID = "transaction", id
 		}
 		if err := accounts.MarkReconciled(ctx, tx, userID, accountID, actual, s.now().UTC()); err != nil {
-			return err
-		}
-		if err := audit.Log(ctx, tx, userID, "account.reconciled", map[string]any{"account_id": accountID, "difference": res.Difference}); err != nil {
 			return err
 		}
 		if err := idempotency.Complete(ctx, tx, userID, key, resource, resourceID); err != nil {

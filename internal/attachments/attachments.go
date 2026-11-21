@@ -20,7 +20,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"plinth/server/internal/audit"
 	"plinth/server/internal/platform/apierr"
 	"plinth/server/internal/platform/dbx"
 	"plinth/server/internal/platform/ids"
@@ -212,7 +211,7 @@ func (s *Service) RequestUpload(ctx context.Context, userID string, in UploadInp
 			}
 			return err
 		}
-		return audit.Log(ctx, tx, userID, "attachment.upload_requested", map[string]any{"attachment_id": id, "transaction_id": tid})
+		return nil
 	})
 	if err != nil {
 		return Attachment{}, UploadTarget{}, err
@@ -252,7 +251,6 @@ func (s *Service) Complete(ctx context.Context, userID, id string) (Attachment, 
 	reject := func(reason error) (Attachment, error) {
 		_ = s.store.Delete(ctx, key)
 		_, _ = s.db.Exec(ctx, `UPDATE attachments SET status='rejected', deleted_at=now(), object_removed=true WHERE id=$1 AND status='pending'`, id)
-		_ = audit.Log(ctx, s.db, userID, "attachment.rejected", map[string]any{"attachment_id": id})
 		return Attachment{}, reason
 	}
 	info, err := s.store.Head(ctx, key)
@@ -289,7 +287,7 @@ func (s *Service) Complete(ctx context.Context, userID, id string) (Attachment, 
 	if err != nil {
 		return Attachment{}, err
 	}
-	return a, audit.Log(ctx, s.db, userID, "attachment.uploaded", map[string]any{"attachment_id": id})
+	return a, nil
 }
 
 func (s *Service) get(ctx context.Context, userID, id string) (Attachment, error) {
@@ -319,7 +317,6 @@ func (s *Service) DownloadURL(ctx context.Context, userID, id string) (string, t
 	if !ownsKey(userID, key) {
 		return "", time.Time{}, apierr.ErrNotFound
 	}
-	_ = audit.Log(ctx, s.db, userID, "attachment.download_url", map[string]any{"attachment_id": id})
 	return s.store.PresignGet(key, name, downloadTTL)
 }
 
@@ -340,7 +337,7 @@ func (s *Service) Delete(ctx context.Context, userID, id string) error {
 	if err := s.store.Delete(ctx, key); err == nil {
 		_, _ = s.db.Exec(ctx, `UPDATE attachments SET object_removed=true WHERE id=$1`, id)
 	}
-	return audit.Log(ctx, s.db, userID, "attachment.deleted", map[string]any{"attachment_id": id})
+	return nil
 }
 
 func (s *Service) ForTransaction(ctx context.Context, userID, txID string) ([]Attachment, error) {

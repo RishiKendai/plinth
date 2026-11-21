@@ -166,7 +166,6 @@ func (p *Purger) Purge(ctx context.Context, userID string) error {
 			`DELETE FROM tags WHERE user_id=$1`,
 			`DELETE FROM accounts WHERE user_id=$1`,
 			`DELETE FROM categories WHERE user_id=$1`,
-			`DELETE FROM audit_events WHERE user_id=$1`,
 			`DELETE FROM users WHERE id=$1`, // sessions, settings, idempotency keys and tokens go with it
 		}
 		for _, q := range steps {

@@ -13,6 +13,7 @@ import (
 	"plinth/server/internal/analytics"
 	"plinth/server/internal/attachments"
 	"plinth/server/internal/auth"
+	"plinth/server/internal/idempotency"
 	"plinth/server/internal/platform/config"
 	"plinth/server/internal/platform/database"
 	"plinth/server/internal/platform/logging"
@@ -56,7 +57,12 @@ func run() error {
 			log.Error("purge failed", "err", err.Error())
 			return
 		}
-		log.Info("purge done", "sessions", s)
+		// Idempotency keys older than their lifetime are only dead weight; deleting them keeps the table small.
+		k, kerr := idempotency.Purge(jctx, db, time.Now())
+		if kerr != nil {
+			log.Error("idempotency purge failed", "err", kerr.Error())
+		}
+		log.Info("purge done", "sessions", s, "idempotency_keys", k)
 	}
 	// Generation needs only the database: it creates expectations, never transactions.
 	rec := recurrence.NewService(db, nil, nil)

@@ -12,7 +12,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"plinth/server/internal/audit"
 	"plinth/server/internal/idempotency"
 	"plinth/server/internal/money"
 	"plinth/server/internal/platform/apierr"
@@ -184,9 +183,6 @@ func (s *Service) Create(ctx context.Context, userID, key string, in Input) (Vie
 			}
 			return err
 		}
-		if err := audit.Log(ctx, tx, userID, "tracker.created", map[string]any{"tracker_id": id}); err != nil {
-			return err
-		}
 		if err := idempotency.Complete(ctx, tx, userID, key, "tracker", id); err != nil {
 			return err
 		}
@@ -272,9 +268,6 @@ func (s *Service) Update(ctx context.Context, userID, id string, in UpdateInput)
 		}
 		return View{}, ErrVersion
 	}
-	if err := audit.Log(ctx, s.db, userID, "tracker.updated", map[string]any{"tracker_id": id}); err != nil {
-		return View{}, err
-	}
 	return s.Get(ctx, userID, id)
 }
 
@@ -286,9 +279,6 @@ func (s *Service) SetArchived(ctx context.Context, userID, id string, archive bo
 	}
 	if tag.RowsAffected() == 0 {
 		return View{}, apierr.ErrNotFound
-	}
-	if err := audit.Log(ctx, s.db, userID, map[bool]string{true: "tracker.archived", false: "tracker.unarchived"}[archive], map[string]any{"tracker_id": id}); err != nil {
-		return View{}, err
 	}
 	return s.Get(ctx, userID, id)
 }
@@ -337,9 +327,6 @@ func (s *Service) AddTransactions(ctx context.Context, userID, id string, txIDs 
 			if _, err := tx.Exec(ctx, `INSERT INTO tracker_transactions (tracker_id, transaction_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, id, x); err != nil {
 				return err
 			}
-		}
-		if err := audit.Log(ctx, tx, userID, "tracker.transactions_added", map[string]any{"tracker_id": id, "count": len(uniq)}); err != nil {
-			return err
 		}
 		t, err := fetch(ctx, tx, userID, id)
 		if err != nil {

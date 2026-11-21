@@ -21,7 +21,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plinth/server/internal/accounts"
-	"plinth/server/internal/audit"
 	"plinth/server/internal/idempotency"
 	"plinth/server/internal/money"
 	"plinth/server/internal/platform/apierr"
@@ -252,9 +251,6 @@ func (s *Service) Create(ctx context.Context, userID, key string, in CreateInput
 		if _, err := tx.Exec(ctx, `INSERT INTO group_members (id, group_id, user_id, display_name, role) VALUES ($1,$2,$3,$4,'admin')`, ids.New(), id, userID, clip(display, 60)); err != nil {
 			return err
 		}
-		if err := audit.Log(ctx, tx, userID, "group.created", map[string]any{"group_id": id}); err != nil {
-			return err
-		}
 		if err := idempotency.Complete(ctx, tx, userID, key, "group", id); err != nil {
 			return err
 		}
@@ -366,7 +362,6 @@ func (s *Service) SetArchived(ctx context.Context, userID, id string, archive bo
 	if _, err := s.db.Exec(ctx, `UPDATE groups SET archived_at = CASE WHEN $2 THEN COALESCE(archived_at, now()) ELSE NULL END, version=version+1, updated_at=now() WHERE id=$1`, id, archive); err != nil {
 		return Group{}, err
 	}
-	_ = audit.Log(ctx, s.db, userID, map[bool]string{true: "group.archived", false: "group.unarchived"}[archive], map[string]any{"group_id": id})
 	return s.get(ctx, s.db, userID, id)
 }
 
@@ -384,7 +379,6 @@ func (s *Service) AddMember(ctx context.Context, userID, groupID, name string) (
 	if _, err := s.db.Exec(ctx, `INSERT INTO group_members (id, group_id, display_name) VALUES ($1,$2,$3)`, id, groupID, n); err != nil {
 		return Member{}, err
 	}
-	_ = audit.Log(ctx, s.db, userID, "group.member_added", map[string]any{"group_id": groupID, "member_id": id})
 	return Member{ID: id, Name: n, Role: "member"}, nil
 }
 
@@ -432,7 +426,7 @@ func (s *Service) RemoveMember(ctx context.Context, userID, groupID, memberID st
 		if _, err := tx.Exec(ctx, `UPDATE group_members SET removed_at=now() WHERE id=$1`, target); err != nil {
 			return err
 		}
-		return audit.Log(ctx, tx, userID, "group.member_removed", map[string]any{"group_id": groupID, "member_id": target})
+		return nil
 	})
 }
 
@@ -467,7 +461,7 @@ func (s *Service) SetRole(ctx context.Context, userID, groupID, memberID, role s
 		if _, err := tx.Exec(ctx, `UPDATE group_members SET role=$2 WHERE id=$1`, memberID, role); err != nil {
 			return err
 		}
-		return audit.Log(ctx, tx, userID, "group.role_changed", map[string]any{"group_id": groupID, "member_id": memberID, "role": role})
+		return nil
 	})
 }
 
@@ -502,7 +496,6 @@ func (s *Service) Invite(ctx context.Context, userID, groupID, memberID string) 
 		ids.New(), groupID, memberID, h[:], userID, exp); err != nil {
 		return "", time.Time{}, err
 	}
-	_ = audit.Log(ctx, s.db, userID, "group.invited", map[string]any{"group_id": groupID, "member_id": memberID})
 	return code, exp, nil
 }
 
@@ -546,7 +539,7 @@ func (s *Service) Redeem(ctx context.Context, userID, code string) (Group, error
 			return err
 		}
 		_ = display // the slot keeps the name the admin gave it
-		return audit.Log(ctx, tx, userID, "group.joined", map[string]any{"group_id": gid, "member_id": memberID})
+		return nil
 	})
 	if err != nil {
 		return Group{}, err
@@ -685,9 +678,6 @@ func (s *Service) AddExpense(ctx context.Context, userID, key, groupID string, i
 			return err
 		}
 		if err := s.addExpenseInTx(ctx, tx, userID, groupID, id, title, in); err != nil {
-			return err
-		}
-		if err := audit.Log(ctx, tx, userID, "group.expense_added", map[string]any{"group_id": groupID, "expense_id": id}); err != nil {
 			return err
 		}
 		if err := idempotency.Complete(ctx, tx, userID, key, "group_expense", id); err != nil {
@@ -952,9 +942,6 @@ func (s *Service) VoidExpense(ctx context.Context, userID, id string) (Expense, 
 					return err // an existing transaction the caller shared goes back to counting in full; it is never voided by un-sharing
 				}
 			}
-			if err := audit.Log(ctx, tx, userID, "group.expense_voided", map[string]any{"group_id": e.GroupID, "expense_id": id}); err != nil {
-				return err
-			}
 		}
 		out, err = s.expense(ctx, tx, userID, id)
 		return err
@@ -1067,9 +1054,6 @@ func (s *Service) AddSettlement(ctx context.Context, userID, key, groupID string
 			}
 			return err
 		}
-		if err := audit.Log(ctx, tx, userID, "group.settlement_added", map[string]any{"group_id": groupID, "settlement_id": id}); err != nil {
-			return err
-		}
 		if err := idempotency.Complete(ctx, tx, userID, key, "group_settlement", id); err != nil {
 			return err
 		}
@@ -1151,9 +1135,6 @@ func (s *Service) VoidSettlement(ctx context.Context, userID, id string) (Settle
 				if err := s.txs.VoidInTx(ctx, tx, userID, *txID); err != nil {
 					return err
 				}
-			}
-			if err := audit.Log(ctx, tx, userID, "group.settlement_voided", map[string]any{"group_id": x.GroupID, "settlement_id": id}); err != nil {
-				return err
 			}
 		}
 		out, err = s.settlement(ctx, tx, userID, id)

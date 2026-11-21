@@ -8,7 +8,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"plinth/server/internal/audit"
 	"plinth/server/internal/categories"
 	"plinth/server/internal/idempotency"
 	"plinth/server/internal/ledger"
@@ -219,7 +218,7 @@ func (s *Service) CreateInTx(ctx context.Context, tx pgx.Tx, userID string, n Ne
 	if err := write(ctx, tx, userID, cur, n); err != nil {
 		return "", err
 	}
-	return n.ID, audit.Log(ctx, tx, userID, "transaction.created", map[string]any{"transaction_id": n.ID, "source": n.Source, "type": n.Type})
+	return n.ID, nil
 }
 
 type CreateInput struct {
@@ -324,9 +323,6 @@ func (s *Service) Create(ctx context.Context, userID, key string, in CreateInput
 		if err := write(ctx, tx, userID, cur, n); err != nil {
 			return err
 		}
-		if err := audit.Log(ctx, tx, userID, "transaction.created", map[string]any{"transaction_id": id, "source": source, "type": n.Type}); err != nil {
-			return err
-		}
 		if err := idempotency.Complete(ctx, tx, userID, key, "transaction", id); err != nil {
 			return err
 		}
@@ -420,7 +416,7 @@ func (s *Service) ChangeStatus(ctx context.Context, userID, key, id, to string) 
 				return err
 			}
 		}
-		return audit.Log(ctx, tx, userID, "transaction.status_changed", map[string]any{"transaction_id": id, "from": ls[0].Status, "to": to})
+		return nil
 	})
 }
 
@@ -440,7 +436,7 @@ func (s *Service) Void(ctx context.Context, userID, key, id string) (Transaction
 				return err
 			}
 		}
-		return audit.Log(ctx, tx, userID, "transaction.voided", map[string]any{"transaction_id": id, "from": ls[0].Status})
+		return nil
 	})
 }
 
@@ -460,7 +456,7 @@ func (s *Service) Undo(ctx context.Context, userID, key, id string) (Transaction
 				return err
 			}
 		}
-		return audit.Log(ctx, tx, userID, "transaction.void_undone", map[string]any{"transaction_id": id})
+		return nil
 	})
 }
 
@@ -539,9 +535,6 @@ func (s *Service) Delete(ctx context.Context, userID, key, id string) error {
 				return err
 			}
 		}
-		if err := audit.Log(ctx, tx, userID, "transaction.deleted", map[string]any{"transaction_id": id, "status": ls[0].Status}); err != nil {
-			return err
-		}
 		return idempotency.Complete(ctx, tx, userID, key, "transaction", id)
 	})
 }
@@ -610,7 +603,7 @@ func (s *Service) VoidInTx(ctx context.Context, tx pgx.Tx, userID, id string) er
 			return err
 		}
 	}
-	return audit.Log(ctx, tx, userID, "transaction.voided", map[string]any{"transaction_id": id, "by": "system"})
+	return nil
 }
 
 // ChangeStatusInTx applies a status transition inside the caller's database transaction. Other modules (for example
@@ -628,9 +621,6 @@ func (s *Service) ChangeStatusInTx(ctx context.Context, tx pgx.Tx, userID, id, t
 		if err := applyStatus(ctx, tx, userID, l, to); err != nil {
 			return Transaction{}, err
 		}
-	}
-	if err := audit.Log(ctx, tx, userID, "transaction.status_changed", map[string]any{"transaction_id": id, "from": ls[0].Status, "to": to}); err != nil {
-		return Transaction{}, err
 	}
 	return load(ctx, tx, userID, id)
 }

@@ -187,7 +187,6 @@ func (s *Service) SignIn(ctx context.Context, emailIn, password string, dev Devi
 	if err != nil {
 		return UserView{}, Tokens{}, err
 	}
-	s.store.audit(ctx, u.ID, "user.signed_in", map[string]any{"session_id": tok.SessionID})
 	return view(u), tok, nil
 }
 
@@ -307,14 +306,12 @@ func (s *Service) RevokeSession(ctx context.Context, p Principal, id string) err
 	if !ok {
 		return apierr.ErrNotFound
 	}
-	s.store.audit(ctx, p.UserID, "session.revoked", map[string]any{"session_id": id})
 	return nil
 }
 
 func (s *Service) RevokeOthers(ctx context.Context, p Principal) error {
 	n, err := s.store.revokeOthers(ctx, p.UserID, p.SessionID, s.now())
 	if err == nil && n > 0 {
-		s.store.audit(ctx, p.UserID, "session.revoked_others", map[string]any{"count": n})
 	}
 	return err
 }

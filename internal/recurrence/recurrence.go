@@ -18,7 +18,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plinth/server/internal/accounts"
-	"plinth/server/internal/audit"
 	"plinth/server/internal/calendar"
 	"plinth/server/internal/categories"
 	"plinth/server/internal/idempotency"
@@ -307,9 +306,6 @@ func (s *Service) Create(ctx context.Context, userID, key string, in Input) (Sch
 		if _, err := s.generate(ctx, tx, id, s.now()); err != nil {
 			return err
 		}
-		if err := audit.Log(ctx, tx, userID, "recurrence.created", map[string]any{"schedule_id": id}); err != nil {
-			return err
-		}
 		if err := idempotency.Complete(ctx, tx, userID, key, "recurrence", id); err != nil {
 			return err
 		}
@@ -566,9 +562,6 @@ func (s *Service) Update(ctx context.Context, userID, id string, in UpdateInput)
 		if _, err := s.generate(ctx, tx, id, now); err != nil {
 			return err
 		}
-		if err := audit.Log(ctx, tx, userID, "recurrence.updated", map[string]any{"schedule_id": id, "pattern_changed": pattern}); err != nil {
-			return err
-		}
 		out, err = scanSched(tx.QueryRow(ctx, `SELECT `+schedCols+` FROM recurring_schedules s WHERE s.id=$1`, id))
 		return err
 	})
@@ -623,9 +616,6 @@ func (s *Service) SetStatus(ctx context.Context, userID, id, action string) (Sch
 			if _, err := s.generate(ctx, tx, id, now); err != nil {
 				return err
 			}
-		}
-		if err := audit.Log(ctx, tx, userID, "recurrence."+action, map[string]any{"schedule_id": id}); err != nil {
-			return err
 		}
 		out, err = scanSched(tx.QueryRow(ctx, `SELECT `+schedCols+` FROM recurring_schedules s WHERE s.id=$1`, id))
 		return err
@@ -736,9 +726,6 @@ func (s *Service) Confirm(ctx context.Context, userID, key, scheduleID, occID st
 		if _, err := tx.Exec(ctx, `UPDATE recurring_occurrences SET status='confirmed', transaction_id=$2, resolved_at=now() WHERE id=$1`, occID, txID); err != nil {
 			return err
 		}
-		if err := audit.Log(ctx, tx, userID, "recurrence.occurrence_confirmed", map[string]any{"occurrence_id": occID, "transaction_id": txID}); err != nil {
-			return err
-		}
 		if err := idempotency.Complete(ctx, tx, userID, key, "occurrence", occID); err != nil {
 			return err
 		}
@@ -764,9 +751,6 @@ func (s *Service) Skip(ctx context.Context, userID, scheduleID, occID string) (O
 			return ErrClosed
 		}
 		if _, err := tx.Exec(ctx, `UPDATE recurring_occurrences SET status='skipped', resolved_at=now() WHERE id=$1`, occID); err != nil {
-			return err
-		}
-		if err := audit.Log(ctx, tx, userID, "recurrence.occurrence_skipped", map[string]any{"occurrence_id": occID}); err != nil {
 			return err
 		}
 		out, err = scanOcc(tx.QueryRow(ctx, `SELECT `+occCols+` `+occFrom+` WHERE o.id=$1`, occID))

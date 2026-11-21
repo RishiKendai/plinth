@@ -92,7 +92,7 @@ func Reset(ctx context.Context, pool *pgxpool.Pool) error {
 // Truncate clears all data between tests.
 func Truncate(t testing.TB, pool *pgxpool.Pool) {
 	t.Helper()
-	if _, err := pool.Exec(context.Background(), `TRUNCATE users, audit_events RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := pool.Exec(context.Background(), `TRUNCATE users RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatal(err)
 	}
 	// The cascade also emptied the built-in categories.

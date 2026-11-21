@@ -12,7 +12,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"plinth/server/internal/audit"
 	"plinth/server/internal/auth"
 	"plinth/server/internal/platform/apierr"
 	"plinth/server/internal/platform/httpx"
@@ -71,7 +70,7 @@ func (s *Service) RequestDeletion(ctx context.Context, userID, password string) 
 		if _, err := tx.Exec(ctx, `UPDATE users SET deletion_requested_at = COALESCE(deletion_requested_at, $2), updated_at = $2 WHERE id = $1`, userID, s.now()); err != nil {
 			return err
 		}
-		return audit.Log(ctx, tx, userID, "user.deletion_requested", nil)
+		return nil
 	})
 	if err != nil {
 		return Profile{}, err
@@ -84,7 +83,7 @@ func (s *Service) CancelDeletion(ctx context.Context, userID string) (Profile, e
 		if _, err := tx.Exec(ctx, `UPDATE users SET deletion_requested_at = NULL, updated_at = $2 WHERE id = $1`, userID, s.now()); err != nil {
 			return err
 		}
-		return audit.Log(ctx, tx, userID, "user.deletion_cancelled", nil)
+		return nil
 	})
 	if err != nil {
 		return Profile{}, err

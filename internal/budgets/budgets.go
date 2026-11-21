@@ -14,7 +14,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plinth/server/internal/accounts"
-	"plinth/server/internal/audit"
 	"plinth/server/internal/calendar"
 	"plinth/server/internal/categories"
 	"plinth/server/internal/idempotency"
@@ -448,9 +447,6 @@ func (s *Service) Create(ctx context.Context, userID, key string, in Input) (Vie
 		if _, err := tx.Exec(ctx, `INSERT INTO budget_limits (budget_id, effective_from, amount) VALUES ($1,$2,$3)`, id, first, r.Limit); err != nil {
 			return err
 		}
-		if err := audit.Log(ctx, tx, userID, "budget.created", map[string]any{"budget_id": id}); err != nil {
-			return err
-		}
 		if err := idempotency.Complete(ctx, tx, userID, key, "budget", id); err != nil {
 			return err
 		}
@@ -584,9 +580,6 @@ func (s *Service) Update(ctx context.Context, userID, id string, in UpdateInput)
 				return err
 			}
 		}
-		if err := audit.Log(ctx, tx, userID, "budget.updated", map[string]any{"budget_id": id}); err != nil {
-			return err
-		}
 		b, err := s.fetch(ctx, tx, userID, id)
 		if err != nil {
 			return err
@@ -606,9 +599,6 @@ func (s *Service) SetArchived(ctx context.Context, userID, id string, archive bo
 	}
 	if tag.RowsAffected() == 0 {
 		return View{}, apierr.ErrNotFound
-	}
-	if err := audit.Log(ctx, s.db, userID, map[bool]string{true: "budget.archived", false: "budget.unarchived"}[archive], map[string]any{"budget_id": id}); err != nil {
-		return View{}, err
 	}
 	return s.Get(ctx, userID, id)
 }

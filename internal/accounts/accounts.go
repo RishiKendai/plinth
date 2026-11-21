@@ -13,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"plinth/server/internal/audit"
 	"plinth/server/internal/idempotency"
 	"plinth/server/internal/money"
 	"plinth/server/internal/platform/apierr"
@@ -213,9 +212,6 @@ func (s *Service) Create(ctx context.Context, userID, key string, in CreateInput
 			}
 			return err
 		}
-		if err := audit.Log(ctx, tx, userID, "account.created", map[string]any{"account_id": id, "type": in.Type, "currency": in.Currency}); err != nil {
-			return err
-		}
 		return idempotency.Complete(ctx, tx, userID, key, "account", id)
 	})
 	return out, err
@@ -331,7 +327,7 @@ func (s *Service) Update(ctx context.Context, userID, id string, in UpdateInput)
 		if err != nil {
 			return err
 		}
-		return audit.Log(ctx, tx, userID, "account.updated", map[string]any{"account_id": id})
+		return nil
 	})
 	return out, err
 }
@@ -398,13 +394,6 @@ func (s *Service) setArchived(ctx context.Context, userID, key, id string, archi
 			if dbx.ConstraintName(err) == "accounts_user_name_key" {
 				return ErrExists // restoring would clash with an active account of the same name
 			}
-			return err
-		}
-		ev := "account.unarchived"
-		if archive {
-			ev = "account.archived"
-		}
-		if err := audit.Log(ctx, tx, userID, ev, map[string]any{"account_id": id}); err != nil {
 			return err
 		}
 		if err := idempotency.Complete(ctx, tx, userID, key, "account", id); err != nil {

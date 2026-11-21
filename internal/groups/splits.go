@@ -8,7 +8,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"plinth/server/internal/audit"
 	"plinth/server/internal/idempotency"
 	"plinth/server/internal/platform/apierr"
 	"plinth/server/internal/platform/dbx"
@@ -134,9 +133,6 @@ func (s *Service) CreateSplit(ctx context.Context, userID, key string, in SplitI
 		occurred := when.UTC()
 		exp := ExpenseInput{PaidBy: myID, Title: title, Amount: amount, SplitMethod: in.Method, Participants: parts, TransactionID: tid, OccurredAt: &occurred}
 		if err := s.addExpenseInTx(ctx, tx, userID, gid, ids.New(), name, exp); err != nil {
-			return err
-		}
-		if err := audit.Log(ctx, tx, userID, "split.created", map[string]any{"group_id": gid, "transaction_id": tid}); err != nil {
 			return err
 		}
 		if err := idempotency.Complete(ctx, tx, userID, key, "group", gid); err != nil {

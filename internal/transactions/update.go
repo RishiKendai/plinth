@@ -6,7 +6,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"plinth/server/internal/audit"
 	"plinth/server/internal/idempotency"
 	"plinth/server/internal/ledger"
 	"plinth/server/internal/platform/apierr"
@@ -193,9 +192,6 @@ func (s *Service) Update(ctx context.Context, userID, key, id string, in UpdateI
 			if err := write(ctx, tx, userID, currency, n); err != nil {
 				return err
 			}
-			if err := audit.Log(ctx, tx, userID, "transaction.replaced", map[string]any{"transaction_id": cur.ID, "replacement_id": newID}); err != nil {
-				return err
-			}
 		} else {
 			currency, err := prepare(ctx, tx, userID, &n, cur.ID, !financial)
 			if err != nil {
@@ -217,9 +213,6 @@ func (s *Service) Update(ctx context.Context, userID, key, id string, in UpdateI
 				if err := setTags(ctx, tx, userID, id, n.Tags); err != nil {
 					return err
 				}
-			}
-			if err := audit.Log(ctx, tx, userID, "transaction.updated", map[string]any{"transaction_id": id}); err != nil {
-				return err
 			}
 		}
 		if err := idempotency.Complete(ctx, tx, userID, key, "transaction", newID); err != nil {

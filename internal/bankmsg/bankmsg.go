@@ -19,7 +19,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plinth/server/internal/accounts"
-	"plinth/server/internal/audit"
 	"plinth/server/internal/idempotency"
 	"plinth/server/internal/imports"
 	"plinth/server/internal/platform/apierr"
@@ -211,7 +210,7 @@ func (s *Service) Ingest(ctx context.Context, userID string, in IngestInput) (Ev
 		if err != nil {
 			return err
 		}
-		return audit.Log(ctx, tx, userID, "sms.ingested", map[string]any{"event_id": id, "status": status})
+		return nil
 	})
 	return out, err
 }
@@ -311,9 +310,6 @@ func (s *Service) Add(ctx context.Context, userID, key, id string, in AddInput) 
 		}
 		out, err = scan(tx.QueryRow(ctx, `UPDATE sms_events SET status='added', account_id=$3, transaction_id=$4 WHERE id=$1 AND user_id=$2 RETURNING `+cols, id, userID, aid, txID))
 		if err != nil {
-			return err
-		}
-		if err := audit.Log(ctx, tx, userID, "sms.added", map[string]any{"event_id": id, "transaction_id": txID}); err != nil {
 			return err
 		}
 		return idempotency.Complete(ctx, tx, userID, key, "sms_event", id)

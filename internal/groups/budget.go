@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"plinth/server/internal/accounts"
-	"plinth/server/internal/audit"
 	"plinth/server/internal/idempotency"
 	"plinth/server/internal/platform/apierr"
 	"plinth/server/internal/platform/dbx"
@@ -124,9 +123,6 @@ func (s *Service) AddTopup(ctx context.Context, userID, key, groupID string, in 
 			}
 			return err
 		}
-		if err := audit.Log(ctx, tx, userID, "group.topup_added", map[string]any{"group_id": groupID, "topup_id": id}); err != nil {
-			return err
-		}
 		if err := idempotency.Complete(ctx, tx, userID, key, "group_topup", id); err != nil {
 			return err
 		}
@@ -217,7 +213,6 @@ func (s *Service) VoidTopup(ctx context.Context, userID, id string) (Topup, erro
 					return err
 				}
 			}
-			_ = audit.Log(ctx, tx, userID, "group.topup_voided", map[string]any{"group_id": t.GroupID, "topup_id": id})
 		}
 		out, err = s.topup(ctx, tx, userID, id)
 		return err
@@ -297,7 +292,7 @@ func (s *Service) DeleteGroup(ctx context.Context, userID, groupID string) error
 				return err
 			}
 		}
-		return audit.Log(ctx, tx, userID, "group.deleted", map[string]any{"group_id": groupID})
+		return nil
 	})
 }
 

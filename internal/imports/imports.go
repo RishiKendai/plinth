@@ -23,7 +23,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plinth/server/internal/accounts"
-	"plinth/server/internal/audit"
 	"plinth/server/internal/categories"
 	"plinth/server/internal/money"
 	"plinth/server/internal/platform/apierr"
@@ -236,7 +235,6 @@ func (s *Service) Upload(ctx context.Context, userID string, in UploadInput) (Ba
 		}
 		return Batch{}, err
 	}
-	_ = audit.Log(ctx, s.db, userID, "import.uploaded", map[string]any{"batch_id": id, "rows": len(rows) - 1})
 	b, err := s.get(ctx, s.db, userID, id)
 	if err != nil {
 		return b, err
@@ -793,9 +791,6 @@ func (s *Service) Confirm(ctx context.Context, userID, id string, includeDuplica
 			duplicate_rows=(SELECT count(*) FROM import_rows WHERE batch_id=$1 AND status='duplicate') WHERE id=$1`, id, created); err != nil {
 			return err
 		}
-		if err := audit.Log(ctx, tx, userID, "import.confirmed", map[string]any{"batch_id": id, "created": created}); err != nil {
-			return err
-		}
 		out, err = s.get(ctx, tx, userID, id)
 		return err
 	})
@@ -855,9 +850,6 @@ func (s *Service) Undo(ctx context.Context, userID, id string) (Batch, error) {
 		if _, err := tx.Exec(ctx, `UPDATE import_batches SET status='undone', undone_at=now() WHERE id=$1`, id); err != nil {
 			return err
 		}
-		if err := audit.Log(ctx, tx, userID, "import.undone", map[string]any{"batch_id": id, "voided": len(txIDs)}); err != nil {
-			return err
-		}
 		out, err = s.get(ctx, tx, userID, id)
 		return err
 	})
@@ -876,7 +868,7 @@ type ExportParams struct {
 }
 
 // Export streams the user's transactions as CSV. The file is sensitive financial data: it is only ever returned to
-// the authenticated owner, with no-store caching, an audit event, and spreadsheet-formula neutralisation.
+// the authenticated owner, with no-store caching, and spreadsheet-formula neutralisation.
 func (s *Service) Export(ctx context.Context, userID string, p ExportParams, w io.Writer) (int, error) {
 	loc, tzName, err := s.loc(userID)
 	if err != nil {
@@ -962,7 +954,6 @@ func (s *Service) Export(ctx context.Context, userID string, p ExportParams, w i
 	if err := cw.Error(); err != nil {
 		return n, err
 	}
-	_ = audit.Log(ctx, s.db, userID, "export.created", map[string]any{"rows": n})
 	return n, nil
 }
 

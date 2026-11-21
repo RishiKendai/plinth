@@ -330,11 +330,6 @@ func TestProfileUpdateAndDeletionRequest(t *testing.T) {
 	if r.Status != 200 || r.data()["deletion_requested_at"] != nil {
 		t.Fatalf("cancel: %d %s", r.Status, r.Raw)
 	}
-	var n int
-	_ = pool.QueryRow(context.Background(), `SELECT count(*) FROM audit_events WHERE event LIKE 'user.deletion%'`).Scan(&n)
-	if n != 2 {
-		t.Fatalf("audit events: %d", n)
-	}
 }
 
 func TestSettings(t *testing.T) {

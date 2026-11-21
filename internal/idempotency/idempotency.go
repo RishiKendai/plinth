@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"regexp"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -97,4 +98,15 @@ func Complete(ctx context.Context, q dbx.Q, userID, key, resourceType, resourceI
 	_, err := q.Exec(ctx, `UPDATE idempotency_keys SET resource_type=$3, resource_id=$4 WHERE user_id=$1 AND key=$2`,
 		userID, key, resourceType, resourceID)
 	return err
+}
+
+// KeyLifetime is how long a key is kept. A key exists so a retry of a request that already succeeded (its reply was lost) returns the
+// original result instead of creating a second record, so it cannot be deleted the moment the write succeeds: that retry would then
+// create a duplicate. Retries come from the app's resend queue within hours; 30 days leaves a wide margin and each key is about 150 bytes.
+const KeyLifetime = 30 * 24 * time.Hour
+
+// Purge deletes keys older than KeyLifetime and returns how many went. Safe to run at any time and to repeat.
+func Purge(ctx context.Context, q dbx.Q, now time.Time) (int64, error) {
+	tag, err := q.Exec(ctx, `DELETE FROM idempotency_keys WHERE created_at < $1`, now.Add(-KeyLifetime))
+	return tag.RowsAffected(), err
 }

@@ -10,7 +10,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"plinth/server/internal/audit"
 	"plinth/server/internal/idempotency"
 	"plinth/server/internal/imports"
 	"plinth/server/internal/platform/apierr"
@@ -127,9 +126,6 @@ func (s *Service) CreateReport(ctx context.Context, userID, key string, in Repor
 			if dbx.ConstraintName(err) == "reports_pkey" {
 				return apierr.New(409, "id_taken", "That identifier is already used.")
 			}
-			return err
-		}
-		if err := audit.Log(ctx, tx, userID, "report.created", map[string]any{"report_id": id, "kind": in.Kind}); err != nil {
 			return err
 		}
 		if err := idempotency.Complete(ctx, tx, userID, key, "report", id); err != nil {
