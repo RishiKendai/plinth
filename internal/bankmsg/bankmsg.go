@@ -206,13 +206,50 @@ func (s *Service) Ingest(ctx context.Context, userID string, in IngestInput) (Ev
 			}
 			rows.Close()
 		}
-		out, err = scan(tx.QueryRow(ctx, `UPDATE sms_events SET suggested_account_id=$2, status=$3, transaction_id=$4, duplicate_of=$5 WHERE id=$1 RETURNING `+cols, id, suggested, status, txID, dupOf))
-		if err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE sms_events SET suggested_account_id=$2, status=$3, transaction_id=$4, duplicate_of=$5 WHERE id=$1`, id, suggested, status, txID, dupOf); err != nil {
 			return err
 		}
-		return nil
+		// Layer 4: the same movement already seen in another message (the bank texted twice, or the first was ignored or added).
+		if err := settleDuplicates(ctx, tx, userID); err != nil {
+			return err
+		}
+		out, err = scan(tx.QueryRow(ctx, `SELECT `+cols+` FROM sms_events WHERE id=$1`, id))
+		return err
 	})
 	return out, err
+}
+
+// settleDuplicates moves every message still waiting for review that repeats something already known out of the review list
+// (status duplicate). It runs on every ingest and every listing, so a message never shows up twice no matter how often the inbox is
+// scanned or refreshed, and a message stops being listed once the user has recorded the same movement some other way. Nothing is
+// created or deleted: a duplicate keeps its row and can still be found with status=duplicate.
+func settleDuplicates(ctx context.Context, q dbx.Q, userID string) error {
+	for _, stmt := range []string{
+		// Same bank reference as a transaction the user has.
+		`UPDATE sms_events e SET status='duplicate', duplicate_of=t.id FROM transactions t
+		 WHERE e.user_id=$1 AND e.status='review' AND t.user_id=$1 AND t.status IN ('pending','confirmed')
+		   AND length(e.reference) >= 6 AND t.external_ref <> '' AND (t.external_ref LIKE '%:'||e.reference OR t.external_ref = e.reference)`,
+		// Same suggested account, direction and amount within 36 hours of a transaction the user has.
+		`UPDATE sms_events e SET status='duplicate', duplicate_of=t.id FROM transactions t
+		 WHERE e.user_id=$1 AND e.status='review' AND t.user_id=$1 AND t.status IN ('pending','confirmed')
+		   AND e.suggested_account_id = t.account_id AND t.currency = e.currency AND t.amount = e.amount
+		   AND t.type = CASE e.direction WHEN 'credit' THEN 'income' ELSE 'expense' END
+		   AND t.occurred_at BETWEEN e.received_at - interval '36 hours' AND e.received_at + interval '36 hours'`,
+		// Same bank reference as an earlier message (whatever happened to it).
+		`UPDATE sms_events e SET status='duplicate' WHERE e.user_id=$1 AND e.status='review' AND length(e.reference) >= 6
+		 AND EXISTS (SELECT 1 FROM sms_events o WHERE o.user_id=e.user_id AND o.id<>e.id AND o.reference=e.reference AND o.amount=e.amount
+		   AND (o.received_at < e.received_at OR (o.received_at = e.received_at AND o.id < e.id)))`,
+		// Same account digits, direction, amount and merchant within 10 minutes of an earlier message.
+		`UPDATE sms_events e SET status='duplicate' WHERE e.user_id=$1 AND e.status='review' AND e.account_hint <> '' AND e.merchant <> ''
+		 AND EXISTS (SELECT 1 FROM sms_events o WHERE o.user_id=e.user_id AND o.id<>e.id AND o.account_hint=e.account_hint AND o.direction=e.direction
+		   AND o.amount=e.amount AND lower(o.merchant)=lower(e.merchant) AND o.received_at BETWEEN e.received_at - interval '10 minutes' AND e.received_at
+		   AND (o.received_at < e.received_at OR o.id < e.id))`,
+	} {
+		if _, err := q.Exec(ctx, stmt, userID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func alnum(s string) bool {
@@ -232,6 +269,11 @@ func (s *Service) List(ctx context.Context, userID, status string) ([]Event, err
 	}
 	if status == "" {
 		status = "review"
+	}
+	if status == "review" {
+		if err := settleDuplicates(ctx, s.db, userID); err != nil {
+			return nil, err
+		}
 	}
 	rows, err := s.db.Query(ctx, `SELECT `+cols+` FROM sms_events WHERE user_id=$1 AND status=$2 ORDER BY received_at DESC, id LIMIT 200`, userID, status)
 	if err != nil {

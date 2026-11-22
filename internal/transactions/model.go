@@ -96,7 +96,7 @@ var (
 	ErrNotRestorable = apierr.New(http.StatusConflict, "not_restorable",
 		"This transaction cannot be restored. Record it again instead.")
 	ErrNotDeletable = apierr.New(http.StatusConflict, "not_deletable",
-		"Only a voided or failed transaction can be deleted, and not one that is part of a correction, a share or a group.")
+		"This transaction cannot be deleted: it is part of a correction, or it was recorded by groups, settlements, top-ups or reconcile (void it there instead).")
 	ErrCurrency = apierr.Validation(map[string]string{"currency": "Both accounts must use the same currency. Cross-currency transfers are not supported yet."})
 )
 

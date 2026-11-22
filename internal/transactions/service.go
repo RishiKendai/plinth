@@ -36,9 +36,9 @@ const txCols = `t.id::text, t.account_id::text, t.type, t.amount, t.currency, t.
 	t.refund_of::text, t.replaces_id::text, (SELECT r.id::text FROM transactions r WHERE r.replaces_id = t.id LIMIT 1),
 	COALESCE((SELECT array_agg(tg.name ORDER BY lower(tg.name)) FROM transaction_tags tt JOIN tags tg ON tg.id = tt.tag_id WHERE tt.transaction_id = t.id), '{}'::text[]),
 	t.counted_amount,
-	(SELECT g.id::text FROM group_expenses ge JOIN groups g ON g.id = ge.group_id WHERE ge.transaction_id = t.id AND ge.voided_at IS NULL),
-	(SELECT g.name FROM group_expenses ge JOIN groups g ON g.id = ge.group_id WHERE ge.transaction_id = t.id AND ge.voided_at IS NULL),
-	(SELECT g.kind FROM group_expenses ge JOIN groups g ON g.id = ge.group_id WHERE ge.transaction_id = t.id AND ge.voided_at IS NULL),
+	(SELECT g.id::text FROM groups g WHERE g.id = COALESCE((SELECT ge.group_id FROM group_expenses ge WHERE ge.transaction_id = t.id AND ge.voided_at IS NULL), (SELECT gi.group_id FROM group_incomes gi WHERE gi.transaction_id = t.id AND gi.voided_at IS NULL))),
+	(SELECT g.name FROM groups g WHERE g.id = COALESCE((SELECT ge.group_id FROM group_expenses ge WHERE ge.transaction_id = t.id AND ge.voided_at IS NULL), (SELECT gi.group_id FROM group_incomes gi WHERE gi.transaction_id = t.id AND gi.voided_at IS NULL))),
+	(SELECT g.kind FROM groups g WHERE g.id = COALESCE((SELECT ge.group_id FROM group_expenses ge WHERE ge.transaction_id = t.id AND ge.voided_at IS NULL), (SELECT gi.group_id FROM group_incomes gi WHERE gi.transaction_id = t.id AND gi.voided_at IS NULL))),
 	t.history_only, t.version, t.created_at, t.updated_at, t.deleted_at`
 
 func scanTx(row interface{ Scan(...any) error }) (Transaction, error) {
@@ -509,12 +509,22 @@ func restoreLeg(ctx context.Context, tx pgx.Tx, userID string, l Transaction) er
 // Delete hides a voided (cancelled or reversed) or failed transaction from the user's history, search and exports. It changes no
 // balance: the row and its ledger entries are kept, because the ledger is append-only and they net to zero. A transaction that is
 // part of a correction, a share or a group cannot be deleted. Both legs of a transfer go together.
-func (s *Service) Delete(ctx context.Context, userID, key, id string) error {
+//
+// A live (pending, needs-review or confirmed) transaction can be deleted too, and [effect] says what happens to the balance:
+//   - "undo": it is voided first, so the balance goes back (an expense adds its amount back, an income takes it off), then hidden.
+//   - "keep": it is voided and hidden, and a visible "Balance adjustment" of the same size is recorded so the balance stays exactly as it
+//     was. The ledger is append-only and every balance must be explainable, so the movement is never simply dropped.
+//
+// effect is ignored for a transaction that is already voided or failed (nothing is left to undo).
+func (s *Service) Delete(ctx context.Context, userID, key, id, effect string) error {
 	if err := idempotency.Check(key, true); err != nil {
 		return err
 	}
+	if effect != "" && effect != "undo" && effect != "keep" {
+		return apierr.Validation(map[string]string{"effect": "Choose undo or keep."})
+	}
 	return pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
-		replay, err := idempotency.Begin(ctx, tx, userID, key, "transaction.delete", idempotency.Hash("transaction.delete", []string{id}))
+		replay, err := idempotency.Begin(ctx, tx, userID, key, "transaction.delete", idempotency.Hash("transaction.delete", []string{id, effect}))
 		if err != nil {
 			return err
 		}
@@ -525,17 +535,66 @@ func (s *Service) Delete(ctx context.Context, userID, key, id string) error {
 		if err != nil {
 			return err
 		}
+		live := false
 		for _, l := range ls {
 			if l.DeletedAt != nil {
 				return apierr.ErrNotFound
 			}
 			closed := l.Status == "failed" || l.Status == "cancelled" || l.Status == "reversed"
-			if !closed || l.ReplacedBy != nil || l.ReplacesID != nil || blockedSources[l.Source] || l.CountedAmount != nil {
+			// A live expense shared in a group (counted_amount set) can be deleted: its group record is voided with it, below.
+			if l.ReplacedBy != nil || l.ReplacesID != nil || blockedSources[l.Source] || (l.CountedAmount != nil && closed) {
 				return ErrNotDeletable
+			}
+			if !closed {
+				live = true
+			}
+		}
+		if live {
+			if effect == "" {
+				return apierr.Validation(map[string]string{"effect": "Choose whether the balance changes."})
+			}
+			if err := lockLegAccounts(ctx, tx, userID, ls); err != nil {
+				return err
+			}
+			for _, l := range ls {
+				// Whatever group record points at it goes too: nobody owes anything for a transaction that no longer exists.
+				if _, err := tx.Exec(ctx, `UPDATE group_expenses SET voided_at=now() WHERE transaction_id=$1 AND voided_at IS NULL`, l.ID); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(ctx, `UPDATE group_incomes SET voided_at=now() WHERE transaction_id=$1 AND voided_at IS NULL`, l.ID); err != nil {
+					return err
+				}
+			}
+			for _, l := range ls {
+				if l.Status == "failed" || l.Status == "cancelled" || l.Status == "reversed" {
+					continue
+				}
+				moved := int64(0) // what this leg did to its account's balance
+				if ledger.Counting(l.Status) && !l.HistoryOnly {
+					moved = l.Signed()
+				}
+				to := "cancelled"
+				if l.Status == "confirmed" {
+					to = "reversed"
+				}
+				if err := applyStatus(ctx, tx, userID, l, to); err != nil {
+					return err
+				}
+				if effect == "keep" && moved != 0 {
+					n := NewTx{AccountID: l.AccountID, Type: "income", Amount: moved, Title: "Balance adjustment", Status: "confirmed",
+						OccurredAt: s.now().UTC(), Timezone: "Asia/Kolkata", Source: "reconcile",
+						Notes: "Recorded so the balance stayed as it was when a transaction was deleted without undoing its effect."}
+					if moved < 0 {
+						n.Type, n.Amount = "expense", -moved
+					}
+					if _, err := s.CreateInTx(ctx, tx, userID, n); err != nil {
+						return err
+					}
+				}
 			}
 		}
 		for _, l := range ls {
-			if _, err := tx.Exec(ctx, `UPDATE transactions SET deleted_at=now(), version=version+1 WHERE id=$1`, l.ID); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE transactions SET deleted_at=now(), version=version+1, updated_at=now() WHERE id=$1`, l.ID); err != nil {
 				return err
 			}
 		}

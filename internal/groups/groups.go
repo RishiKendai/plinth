@@ -52,14 +52,16 @@ type Group struct {
 	MyNet       int64      `json:"my_net"` // positive: the group owes you
 	ArchivedAt  *time.Time `json:"archived_at"`
 	Version     int        `json:"version"`
-	Kind        string     `json:"kind"`         // group | split
-	Purpose     string     `json:"purpose"`      // budget | tracker, fixed at creation
-	BudgetLimit *int64     `json:"budget_limit"` // a budget's opening amount (null for a tracker)
-	TopupTotal  int64      `json:"topup_total"`  // everything added to a budget since
-	SpentTotal  int64      `json:"spent_total"`  // everything the group has spent
-	Remaining   *int64     `json:"remaining"`    // budget: opening amount + top-ups - spent; null for a tracker
-	MonthSpent  int64      `json:"month_spent"`  // what the group spent this (UTC) month
-	CreatedAt   time.Time  `json:"created_at"`
+	Kind        string     `json:"kind"` // group | split
+	// SplitEnabled is false for a group that only collects transactions: nobody can be split with and nobody owes anyone.
+	SplitEnabled bool      `json:"split_enabled"`
+	Purpose      string    `json:"purpose"`      // budget | tracker, fixed at creation
+	BudgetLimit  *int64    `json:"budget_limit"` // a budget's opening amount (null for a tracker)
+	TopupTotal   int64     `json:"topup_total"`  // everything added to a budget since
+	SpentTotal   int64     `json:"spent_total"`  // everything the group has spent
+	Remaining    *int64    `json:"remaining"`    // budget: opening amount + top-ups - spent; null for a tracker
+	MonthSpent   int64     `json:"month_spent"`  // what the group spent this (UTC) month
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 type Member struct {
@@ -97,20 +99,22 @@ type ShareView struct {
 }
 
 type Expense struct {
-	ID            string      `json:"id"`
-	GroupID       string      `json:"group_id"`
-	PaidBy        string      `json:"paid_by"`
-	CreatedBy     string      `json:"created_by"`
-	Title         string      `json:"title"`
-	Amount        int64       `json:"amount"`
-	Currency      string      `json:"currency"`
-	SplitMethod   string      `json:"split_method"`
-	OccurredAt    time.Time   `json:"occurred_at"`
-	Notes         string      `json:"notes"`
-	Voided        bool        `json:"voided"`
-	Shares        []ShareView `json:"shares"`
-	InMyLedger    bool        `json:"in_my_ledger"` // true only for the member who recorded their own payment
-	CreatedAt     time.Time   `json:"created_at"`
+	ID          string      `json:"id"`
+	GroupID     string      `json:"group_id"`
+	PaidBy      string      `json:"paid_by"`
+	CreatedBy   string      `json:"created_by"`
+	Title       string      `json:"title"`
+	Amount      int64       `json:"amount"`
+	Currency    string      `json:"currency"`
+	SplitMethod string      `json:"split_method"`
+	OccurredAt  time.Time   `json:"occurred_at"`
+	Notes       string      `json:"notes"`
+	Voided      bool        `json:"voided"`
+	Shares      []ShareView `json:"shares"`
+	InMyLedger  bool        `json:"in_my_ledger"` // true only for the member who recorded their own payment
+	// TransactionID is the caller's own ledger transaction behind this expense. It is sent only to the member who owns it.
+	TransactionID *string   `json:"transaction_id,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 	transactionID *string
 	ownerUserID   *string
 }
@@ -182,6 +186,8 @@ type CreateInput struct {
 	// Purpose is chosen once and never changes: "budget" (needs a monthly BudgetLimit) or "tracker" (no limit). Empty means tracker.
 	Purpose     string `json:"purpose"`
 	BudgetLimit *int64 `json:"budget_limit"`
+	// SplitEnabled lets expenses in the group be split between members. Omitted means true.
+	SplitEnabled *bool `json:"split_enabled"`
 }
 
 func (s *Service) Create(ctx context.Context, userID, key string, in CreateInput) (Group, error) {
@@ -242,7 +248,7 @@ func (s *Service) Create(ctx context.Context, userID, key string, in CreateInput
 		if strings.TrimSpace(display) == "" {
 			display = strings.Split(email, "@")[0]
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO groups (id, name, currency, created_by, purpose, budget_limit) VALUES ($1,$2,$3,$4,$5,$6)`, id, name, in.Currency, userID, purpose, in.BudgetLimit); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO groups (id, name, currency, created_by, purpose, budget_limit, split_enabled) VALUES ($1,$2,$3,$4,$5,$6,$7)`, id, name, in.Currency, userID, purpose, in.BudgetLimit, in.SplitEnabled == nil || *in.SplitEnabled); err != nil {
 			if dbx.ConstraintName(err) == "groups_pkey" {
 				return transactions.ErrIDTaken
 			}
@@ -271,11 +277,11 @@ func clip(s string, n int) string {
 func (s *Service) get(ctx context.Context, q dbx.Q, userID, id string) (Group, error) {
 	var g Group
 	err := q.QueryRow(ctx, `SELECT g.id::text, g.name, g.currency, m.id::text, m.role, (SELECT count(*) FROM group_members x WHERE x.group_id=g.id AND x.removed_at IS NULL),
-		g.archived_at, g.version, g.created_at, g.kind, g.budget_limit, g.purpose,
+		g.archived_at, g.version, g.created_at, g.kind, g.budget_limit, g.purpose, g.split_enabled,
 		COALESCE((SELECT SUM(t.amount) FROM group_topups t WHERE t.group_id=g.id AND t.voided_at IS NULL),0)::bigint,
 		COALESCE((SELECT SUM(e.amount) FROM group_expenses e WHERE e.group_id=g.id AND e.voided_at IS NULL),0)::bigint,
 		COALESCE((SELECT SUM(e.amount) FROM group_expenses e WHERE e.group_id=g.id AND e.voided_at IS NULL AND e.occurred_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'),0)::bigint FROM groups g JOIN group_members m ON m.group_id=g.id AND m.user_id=$2 AND m.removed_at IS NULL WHERE g.id=$1`, id, userID).
-		Scan(&g.ID, &g.Name, &g.Currency, &g.MyMemberID, &g.MyRole, &g.MemberCount, &g.ArchivedAt, &g.Version, &g.CreatedAt, &g.Kind, &g.BudgetLimit, &g.Purpose, &g.TopupTotal, &g.SpentTotal, &g.MonthSpent)
+		Scan(&g.ID, &g.Name, &g.Currency, &g.MyMemberID, &g.MyRole, &g.MemberCount, &g.ArchivedAt, &g.Version, &g.CreatedAt, &g.Kind, &g.BudgetLimit, &g.Purpose, &g.SplitEnabled, &g.TopupTotal, &g.SpentTotal, &g.MonthSpent)
 	if dbx.IsNoRows(err) {
 		return g, apierr.ErrNotFound
 	}
@@ -337,15 +343,21 @@ func (s *Service) list(ctx context.Context, userID, kind string) ([]Group, error
 	return out, nil
 }
 
-func (s *Service) Rename(ctx context.Context, userID, id, name string, version int) (Group, error) {
+// Update changes the name and/or whether the group splits expenses. Admin only. Turning splitting off keeps every split already
+// recorded; it only stops new ones.
+func (s *Service) Update(ctx context.Context, userID, id string, name *string, splitEnabled *bool, version int) (Group, error) {
 	if _, err := admin(ctx, s.db, userID, id); err != nil {
 		return Group{}, err
 	}
-	n, ok := cleanName(name, 80)
-	if !ok {
-		return Group{}, apierr.Validation(map[string]string{"name": "Enter a name of 1 to 80 characters."})
+	n := ""
+	if name != nil {
+		var ok bool
+		n, ok = cleanName(*name, 80)
+		if !ok {
+			return Group{}, apierr.Validation(map[string]string{"name": "Enter a name of 1 to 80 characters."})
+		}
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE groups SET name=$2, version=version+1, updated_at=now() WHERE id=$1 AND version=$3`, id, n, version)
+	tag, err := s.db.Exec(ctx, `UPDATE groups SET name=COALESCE(NULLIF($2,''), name), split_enabled=COALESCE($4, split_enabled), version=version+1, updated_at=now() WHERE id=$1 AND version=$3`, id, n, version, splitEnabled)
 	if err != nil {
 		return Group{}, err
 	}
@@ -726,6 +738,15 @@ func (s *Service) addExpenseInTx(ctx context.Context, tx pgx.Tx, userID, groupID
 	if paidBy == "" {
 		paidBy = myID
 	}
+	var kind string
+	var splitOn bool
+	if err := tx.QueryRow(ctx, `SELECT kind, split_enabled FROM groups WHERE id=$1`, groupID).Scan(&kind, &splitOn); err != nil {
+		return err
+	}
+	// A group that does not split takes each expense whole: the payer is the only participant.
+	if kind == "group" && !splitOn && (len(in.Participants) > 1 || (len(in.Participants) == 1 && ids.Normalize(in.Participants[0].MemberID) != paidBy)) {
+		return apierr.Validation(map[string]string{"participants": "This group does not split expenses."})
+	}
 	if !active[paidBy] {
 		return apierr.Validation(map[string]string{"paid_by": "Choose someone who is in the group."})
 	}
@@ -785,7 +806,8 @@ func (s *Service) addExpenseInTx(ctx context.Context, tx pgx.Tx, userID, groupID
 		}
 		var typ, tcur, tstatus, tsource string
 		var tamount int64
-		err := tx.QueryRow(ctx, `SELECT type, currency, status, source, amount FROM transactions WHERE id=$1 AND user_id=$2 FOR UPDATE`, tid, userID).Scan(&typ, &tcur, &tstatus, &tsource, &tamount)
+		var tWhen time.Time
+		err := tx.QueryRow(ctx, `SELECT type, currency, status, source, amount, occurred_at FROM transactions WHERE id=$1 AND user_id=$2 FOR UPDATE`, tid, userID).Scan(&typ, &tcur, &tstatus, &tsource, &tamount, &tWhen)
 		switch {
 		case dbx.IsNoRows(err):
 			return bad("Choose one of your transactions.")
@@ -802,6 +824,10 @@ func (s *Service) addExpenseInTx(ctx context.Context, tx pgx.Tx, userID, groupID
 		}
 		// A transaction backs at most one live share, so it is never counted in two groups. To put it somewhere else it must be moved:
 		// its share in the other group is voided here, in the same database transaction, and the new share is recorded below.
+		// The expense is dated like the transaction it is made from, not by when it was put in the group, so the group lists it where it belongs in time.
+		if in.OccurredAt == nil {
+			when = tWhen.UTC()
+		}
 		var oldExp, oldGroup, oldName string
 		oerr := tx.QueryRow(ctx, `SELECT e.id::text, e.group_id::text, g.name FROM group_expenses e JOIN groups g ON g.id=e.group_id
 			WHERE e.transaction_id=$1 AND e.voided_at IS NULL FOR UPDATE OF e`, tid).Scan(&oldExp, &oldGroup, &oldName)
@@ -895,6 +921,9 @@ func (s *Service) expense(ctx context.Context, q dbx.Q, userID, id string) (Expe
 		if err := q.QueryRow(ctx, `SELECT user_id::text FROM transactions WHERE id=$1`, *ownerTx).Scan(&own); err == nil {
 			e.ownerUserID = &own
 			e.InMyLedger = own == userID
+			if e.InMyLedger {
+				e.TransactionID = ownerTx
+			}
 		}
 	}
 	return e, rows.Err()

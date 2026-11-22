@@ -31,6 +31,9 @@ func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.H
 	mux.Handle("GET /v1/groups/{id}/expenses", r(h.listExpenses))
 	mux.Handle("GET /v1/group-expenses/{id}", r(h.getExpense))
 	mux.Handle("POST /v1/group-expenses/{id}/void", r(h.voidExpense))
+	mux.Handle("POST /v1/groups/{id}/incomes", r(h.addIncome))
+	mux.Handle("GET /v1/groups/{id}/incomes", r(h.listIncomes))
+	mux.Handle("POST /v1/group-incomes/{id}/void", r(h.voidIncome))
 	mux.Handle("POST /v1/groups/{id}/settlements", r(h.addSettlement))
 	mux.Handle("GET /v1/groups/{id}/settlements", r(h.listSettlements))
 	mux.Handle("POST /v1/group-settlements/{id}/void", r(h.voidSettlement))
@@ -102,14 +105,15 @@ func (h *Handler) rename(w http.ResponseWriter, rq *http.Request) {
 		return
 	}
 	var in struct {
-		Name    string `json:"name"`
-		Version int    `json:"version"`
+		Name         *string `json:"name"`
+		SplitEnabled *bool   `json:"split_enabled"`
+		Version      int     `json:"version"`
 	}
 	if err := httpx.Decode(rq, &in); err != nil {
 		httpx.Error(w, rq, err)
 		return
 	}
-	g, err := h.svc.Rename(rq.Context(), uid, id, in.Name, in.Version)
+	g, err := h.svc.Update(rq.Context(), uid, id, in.Name, in.SplitEnabled, in.Version)
 	if err != nil {
 		httpx.Error(w, rq, err)
 		return
@@ -559,4 +563,59 @@ func (h *Handler) deleteGroup(w http.ResponseWriter, rq *http.Request) {
 		return
 	}
 	httpx.NoContent(w)
+}
+
+func (h *Handler) addIncome(w http.ResponseWriter, rq *http.Request) {
+	uid, ok := auth.UserID(w, rq)
+	if !ok {
+		return
+	}
+	id, ok := httpx.PathUUID(w, rq, "id")
+	if !ok {
+		return
+	}
+	var in IncomeInput
+	if err := httpx.Decode(rq, &in); err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	out, err := h.svc.AddIncome(rq.Context(), uid, id, in)
+	if err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	httpx.JSON(w, http.StatusCreated, out)
+}
+
+func (h *Handler) listIncomes(w http.ResponseWriter, rq *http.Request) {
+	uid, ok := auth.UserID(w, rq)
+	if !ok {
+		return
+	}
+	id, ok := httpx.PathUUID(w, rq, "id")
+	if !ok {
+		return
+	}
+	out, err := h.svc.ListIncomes(rq.Context(), uid, id)
+	if err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, out)
+}
+
+func (h *Handler) voidIncome(w http.ResponseWriter, rq *http.Request) {
+	uid, ok := auth.UserID(w, rq)
+	if !ok {
+		return
+	}
+	id, ok := httpx.PathUUID(w, rq, "id")
+	if !ok {
+		return
+	}
+	if err := h.svc.VoidIncome(rq.Context(), uid, id); err != nil {
+		httpx.Error(w, rq, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

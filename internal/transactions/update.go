@@ -143,7 +143,7 @@ func (s *Service) Update(ctx context.Context, userID, key, id string, in UpdateI
 		}
 		if financial {
 			var shared bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM group_expenses WHERE transaction_id=$1 AND voided_at IS NULL)`, cur.ID).Scan(&shared); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM group_expenses WHERE transaction_id=$1 AND voided_at IS NULL) OR EXISTS (SELECT 1 FROM group_incomes WHERE transaction_id=$1 AND voided_at IS NULL)`, cur.ID).Scan(&shared); err != nil {
 				return err
 			}
 			if shared {

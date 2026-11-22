@@ -1,6 +1,9 @@
 package app_test
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func (e *env) void(t *testing.T, tok, id string) resp {
 	t.Helper()
@@ -85,9 +88,9 @@ func TestDeletingAVoidedTransactionHidesItAndChangesNoBalance(t *testing.T) {
 	tb, _, _ := e.signUp(t, "ravi@example.com")
 	a := e.newAccount(t, tok, "HDFC", "savings", 100000)
 	id := str(e.spend(t, tok, a, 25000, map[string]any{"title": "Wrongly added"}).data(), "id")
-	// A live transaction cannot be deleted: void it first.
-	if r := e.call(t, "DELETE", "/v1/transactions/"+id, tok, newKey(), nil); r.Status != 409 || r.errCode() != "not_deletable" {
-		t.Fatalf("delete live: %d %s", r.Status, r.Raw)
+	// A live transaction needs the owner to say what happens to the balance (effect=undo or keep).
+	if r := e.call(t, "DELETE", "/v1/transactions/"+id, tok, newKey(), nil); r.Status != 422 {
+		t.Fatalf("delete live without saying what happens to the balance: %d %s", r.Status, r.Raw)
 	}
 	e.void(t, tok, id)
 	bal := e.balance(t, tok, a)
@@ -150,6 +153,91 @@ func TestACorrectedTransactionKeepsItsHistory(t *testing.T) {
 	}
 	if r := e.call(t, "DELETE", "/v1/transactions/"+id, tok, newKey(), nil); r.Status != 409 {
 		t.Fatalf("delete a replaced original: %d %s", r.Status, r.Raw)
+	}
+	assertLedger(t)
+}
+
+func TestDeletingALiveTransactionEitherUndoesItsEffectOrKeepsTheBalance(t *testing.T) {
+	settleNow(t)
+	e := setup(t)
+	tok, _, _ := e.signUp(t, "asha@example.com")
+	tb, _, _ := e.signUp(t, "ravi@example.com")
+	a := e.newAccount(t, tok, "HDFC", "savings", 100000)
+	exp := str(e.spend(t, tok, a, 25000, map[string]any{"title": "Wrongly added"}).data(), "id")
+	inc := str(e.earn(t, tok, a, 40000).data(), "id")
+	if e.balance(t, tok, a) != 115000 {
+		t.Fatalf("setup balance %d", e.balance(t, tok, a))
+	}
+	del := func(id, effect string, token string) resp {
+		return e.call(t, "DELETE", "/v1/transactions/"+id+"?effect="+effect, token, newKey(), nil)
+	}
+	if r := del(exp, "sideways", tok); r.Status != 422 {
+		t.Fatalf("bad effect: %d", r.Status)
+	}
+	if r := del(exp, "undo", tb); r.Status != 404 {
+		t.Fatalf("another user: %d", r.Status)
+	}
+	// Undo: an expense adds its amount back and disappears from the lists.
+	if r := del(exp, "undo", tok); r.Status != 204 || e.balance(t, tok, a) != 140000 {
+		t.Fatalf("undo an expense: %d, balance %d", r.Status, e.balance(t, tok, a))
+	}
+	if raw := e.do(t, "GET", "/v1/transactions", tok, nil).Raw; strings.Contains(string(raw), exp) {
+		t.Fatalf("a deleted transaction must leave the list: %s", raw)
+	}
+	// Keep: the income is deleted, the balance does not move, and a visible adjustment explains it.
+	if r := del(inc, "keep", tok); r.Status != 204 || e.balance(t, tok, a) != 140000 {
+		t.Fatalf("keep the balance: %d, balance %d", r.Status, e.balance(t, tok, a))
+	}
+	raw := string(e.do(t, "GET", "/v1/transactions", tok, nil).Raw)
+	if strings.Contains(raw, inc) || !strings.Contains(raw, "Balance adjustment") {
+		t.Fatalf("the income should be gone and the balance explained by an adjustment: %s", raw)
+	}
+	// An income undone takes its amount off.
+	inc2 := str(e.earn(t, tok, a, 10000).data(), "id")
+	if r := del(inc2, "undo", tok); r.Status != 204 || e.balance(t, tok, a) != 140000 {
+		t.Fatalf("undo an income: %d, balance %d", r.Status, e.balance(t, tok, a))
+	}
+	// Deleting it again, or a transfer's one leg, behaves; a transfer goes as a pair.
+	if r := del(exp, "undo", tok); r.Status != 404 {
+		t.Fatalf("delete twice: %d", r.Status)
+	}
+	b := e.newAccount(t, tok, "SBI", "savings", 0)
+	tr := e.call(t, "POST", "/v1/transfers", tok, newKey(), map[string]any{"from_account_id": a, "to_account_id": b, "amount": 30000})
+	if tr.Status != 201 {
+		t.Fatalf("transfer: %d %s", tr.Status, tr.Raw)
+	}
+	leg := str(tr.data()["legs"].([]any)[0].(map[string]any), "id")
+	if r := del(leg, "keep", tok); r.Status != 204 || e.balance(t, tok, a) != 110000 || e.balance(t, tok, b) != 30000 {
+		t.Fatalf("keep a transfer's balances: %d a=%d b=%d", r.Status, e.balance(t, tok, a), e.balance(t, tok, b))
+	}
+	assertLedger(t)
+}
+
+func TestDeletingASharedTransactionAlsoRemovesItsGroupRecord(t *testing.T) {
+	settleNow(t)
+	e := setup(t)
+	tok, _, _ := e.signUp(t, "asha@example.com")
+	a := e.newAccount(t, tok, "HDFC", "savings", 100000)
+	gid, me := e.newGroup(t, tok, "Goa trip")
+	ben := e.addPerson(t, tok, gid, "Ben")
+	exp := str(e.spend(t, tok, a, 30000, map[string]any{"title": "Dinner"}).data(), "id")
+	if r := e.groupExpense(t, tok, gid, map[string]any{"title": "Dinner", "amount": 30000, "split_method": "equal", "participants": parts(me, 0, ben, 0), "transaction_id": exp}); r.Status != 201 {
+		t.Fatalf("share: %d %s", r.Status, r.Raw)
+	}
+	inc := str(e.earn(t, tok, a, 5000).data(), "id")
+	if r := e.do(t, "POST", "/v1/groups/"+gid+"/incomes", tok, map[string]any{"transaction_id": inc}); r.Status != 201 {
+		t.Fatalf("file income: %d %s", r.Status, r.Raw)
+	}
+	for _, id := range []string{exp, inc} {
+		if r := e.call(t, "DELETE", "/v1/transactions/"+id+"?effect=undo", tok, newKey(), nil); r.Status != 204 {
+			t.Fatalf("delete %s: %d %s", id, r.Status, r.Raw)
+		}
+	}
+	if m := e.members(t, tok, gid); i64(m[ben], "net") != 0 || i64(m[me], "net") != 0 {
+		t.Fatalf("nobody owes anything for a deleted expense: %v", m)
+	}
+	if e.balance(t, tok, a) != 100000 {
+		t.Fatalf("balance should be back to the start: %d", e.balance(t, tok, a))
 	}
 	assertLedger(t)
 }

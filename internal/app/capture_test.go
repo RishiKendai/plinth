@@ -766,3 +766,41 @@ func jsonOf(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
+
+func TestSMSNeverListedTwiceAndLeavesTheListOnceHandled(t *testing.T) {
+	e := setup(t)
+	tok, _, _ := e.signUp(t, "asha@example.com")
+	a := str(e.call(t, "POST", "/v1/accounts", tok, newKey(), map[string]any{"name": "HDFC", "type": "savings", "opening_balance": 1000000, "masked_identifier": "4821"}).data(), "id")
+	listed := func() []any { return e.do(t, "GET", "/v1/sms-events", tok, nil).Body["data"].([]any) }
+	now := time.Now().UTC()
+	// The bank texts twice about one payment (different text and time, same reference): one entry only.
+	first := e.sms(t, tok, map[string]any{"amount": 30000, "merchant": "Cafe", "reference": "REF123456", "account_hint": "", "fingerprint": fp("a"), "received_at": now.Add(-2 * time.Hour).Format(time.RFC3339)})
+	second := e.sms(t, tok, map[string]any{"amount": 30000, "merchant": "Cafe", "reference": "REF123456", "account_hint": "", "fingerprint": fp("b"), "received_at": now.Add(-time.Hour).Format(time.RFC3339)})
+	if str(first.data(), "status") != "review" || str(second.data(), "status") != "duplicate" || len(listed()) != 1 {
+		t.Fatalf("a second message about one payment must not be listed: %s / %s / %d listed", first.Raw, second.Raw, len(listed()))
+	}
+	// Re-sending the same message (a rescan) changes nothing.
+	again := e.sms(t, tok, map[string]any{"amount": 30000, "merchant": "Cafe", "reference": "REF123456", "account_hint": "", "fingerprint": fp("a"), "received_at": now.Add(-2 * time.Hour).Format(time.RFC3339)})
+	if len(listed()) != 1 || str(again.data(), "id") != str(first.data(), "id") {
+		t.Fatalf("rescan: %s, %d listed", again.Raw, len(listed()))
+	}
+	// A message waiting in the list leaves it once the same movement is entered by hand.
+	e.sms(t, tok, map[string]any{"amount": 77700, "merchant": "Book shop", "reference": "", "account_hint": "4821"})
+	if len(listed()) != 2 {
+		t.Fatalf("expected two to review, got %d", len(listed()))
+	}
+	e.spend(t, tok, a, 77700, map[string]any{"title": "Books"})
+	if l := listed(); len(l) != 1 {
+		t.Fatalf("a message matching a transaction added by hand must leave the list: %v", l)
+	}
+	// Added: gone from the list, and a rescan does not bring it back.
+	id := str(listed()[0].(map[string]any), "id")
+	if r := e.call(t, "POST", "/v1/sms-events/"+id+"/add", tok, newKey(), map[string]any{"account_id": a}); r.Status != 200 {
+		t.Fatalf("add: %d %s", r.Status, r.Raw)
+	}
+	e.sms(t, tok, map[string]any{"amount": 30000, "merchant": "Cafe", "reference": "REF123456", "account_hint": "", "fingerprint": fp("a"), "received_at": now.Add(-2 * time.Hour).Format(time.RFC3339)})
+	if len(listed()) != 0 {
+		t.Fatalf("a handled message must not return: %v", listed())
+	}
+	assertLedger(t)
+}

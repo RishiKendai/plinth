@@ -285,7 +285,7 @@ func (s *Service) DeleteGroup(ctx context.Context, userID, groupID string) error
 		// Children first, in dependency order: shares reference members without a cascade of their own.
 		for _, q := range []string{
 			`DELETE FROM expense_shares WHERE expense_id IN (SELECT id FROM group_expenses WHERE group_id=$1)`,
-			`DELETE FROM group_expenses WHERE group_id=$1`, `DELETE FROM group_settlements WHERE group_id=$1`, `DELETE FROM group_topups WHERE group_id=$1`,
+			`DELETE FROM group_expenses WHERE group_id=$1`, `DELETE FROM group_incomes WHERE group_id=$1`, `DELETE FROM group_settlements WHERE group_id=$1`, `DELETE FROM group_topups WHERE group_id=$1`,
 			`DELETE FROM groups WHERE id=$1`,
 		} {
 			if _, err := tx.Exec(ctx, q, groupID); err != nil {

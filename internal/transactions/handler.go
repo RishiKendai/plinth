@@ -356,7 +356,7 @@ func (h *Handler) remove(w http.ResponseWriter, rq *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.svc.Delete(rq.Context(), uid, key(rq), id); err != nil {
+	if err := h.svc.Delete(rq.Context(), uid, key(rq), id, rq.URL.Query().Get("effect")); err != nil {
 		httpx.Error(w, rq, err)
 		return
 	}

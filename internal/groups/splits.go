@@ -152,16 +152,19 @@ type ShareInfo struct {
 	ExpenseID string `json:"expense_id"`
 	MyShare   int64  `json:"my_share"`
 	Total     int64  `json:"total"`
+	// Participants is how many people the expense is split between (1 means it sits in the group whole).
+	Participants int `json:"participants"`
 }
 
 // ShareOf returns the live share of a transaction the caller owns, or nil.
 func (s *Service) ShareOf(ctx context.Context, userID, txID string) (*ShareInfo, error) {
 	var si ShareInfo
 	err := s.db.QueryRow(ctx, `SELECT g.id::text, g.name, g.kind, e.id::text, e.amount,
-		COALESCE((SELECT sh.amount FROM expense_shares sh WHERE sh.expense_id=e.id AND sh.member_id=m.id),0)
+		COALESCE((SELECT sh.amount FROM expense_shares sh WHERE sh.expense_id=e.id AND sh.member_id=m.id),0),
+		(SELECT count(*) FROM expense_shares sx WHERE sx.expense_id=e.id)
 		FROM group_expenses e JOIN groups g ON g.id=e.group_id JOIN group_members m ON m.group_id=g.id AND m.user_id=$2 AND m.removed_at IS NULL
 		JOIN transactions t ON t.id=e.transaction_id AND t.user_id=$2
-		WHERE e.transaction_id=$1 AND e.voided_at IS NULL`, txID, userID).Scan(&si.GroupID, &si.GroupName, &si.Kind, &si.ExpenseID, &si.Total, &si.MyShare)
+		WHERE e.transaction_id=$1 AND e.voided_at IS NULL`, txID, userID).Scan(&si.GroupID, &si.GroupName, &si.Kind, &si.ExpenseID, &si.Total, &si.MyShare, &si.Participants)
 	if dbx.IsNoRows(err) {
 		return nil, nil
 	}

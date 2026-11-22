@@ -158,6 +158,9 @@ func TestGroupExpenseLedgerAndAnalytics(t *testing.T) {
 	if r.Status != 201 || r.data()["in_my_ledger"] != true {
 		t.Fatalf("add: %d %s", r.Status, r.Raw)
 	}
+	if r.data()["transaction_id"] == nil {
+		t.Fatalf("the payer should be told which transaction of theirs backs the expense: %s", r.Raw)
+	}
 	// The whole payment leaves the payer's account...
 	if e.balance(t, tok, acct) != 1000000-30000 {
 		t.Fatalf("balance %d", e.balance(t, tok, acct))
@@ -406,8 +409,8 @@ func TestGroupAdminCannotSeeMembersPersonalFinances(t *testing.T) { // exit crit
 		t.Fatalf("%d %s", r.Status, r.Raw)
 	}
 	exp := e.do(t, "GET", "/v1/group-expenses/"+str(r.data(), "id"), admin, nil)
-	if exp.Status != 200 || exp.data()["in_my_ledger"] != false {
-		t.Fatalf("admin view of expense: %d %s", exp.Status, exp.Raw)
+	if exp.Status != 200 || exp.data()["in_my_ledger"] != false || exp.data()["transaction_id"] != nil {
+		t.Fatalf("admin view of expense (another member's transaction id must never be shown): %d %s", exp.Status, exp.Raw)
 	}
 	for _, leak := range []string{"Ravi secret", "Ravi private", acct, "transaction_id"} {
 		if strings.Contains(exp.Raw, leak) || strings.Contains(e.do(t, "GET", "/v1/groups/"+gid+"/expenses", admin, nil).Raw, leak) {
@@ -853,4 +856,116 @@ func TestMovingATransactionBetweenGroups(t *testing.T) {
 		t.Fatalf("exactly one live share expected: live=%d, old voided=%v", live, old != nil)
 	}
 	assertLedger(t)
+}
+
+func TestAnIncomeCanBeFiledUnderAGroupAndMovedWithoutChangingMoney(t *testing.T) {
+	e := setup(t)
+	tok, _, _ := e.signUp(t, "asha@example.com")
+	acct := e.newAccount(t, tok, "HDFC", "savings", 1000000)
+	gA, _ := e.newGroup(t, tok, "Goa trip")
+	gB, _ := e.newGroup(t, tok, "Flat")
+	inc := str(e.earn(t, tok, acct, 50000).data(), "id")
+	exp := str(e.spend(t, tok, acct, 1000, nil).data(), "id")
+	add := func(g, tx string, move bool) resp {
+		return e.do(t, "POST", "/v1/groups/"+g+"/incomes", tok, map[string]any{"transaction_id": tx, "move": move})
+	}
+	groupOf := func() any { return e.do(t, "GET", "/v1/transactions/"+inc, tok, nil).data()["group_name"] }
+	if r := add(gA, exp, false); r.Status != 400 && r.Status != 422 {
+		t.Fatalf("an expense is not an income: %d %s", r.Status, r.Raw)
+	}
+	first := add(gA, inc, false)
+	if first.Status != 201 || groupOf() != "Goa trip" {
+		t.Fatalf("add income: %d %s group=%v", first.Status, first.Raw, groupOf())
+	}
+	if r := add(gB, inc, false); r.Status != 409 || r.errCode() != "already_shared" {
+		t.Fatalf("second group without move: %d %s", r.Status, r.Raw)
+	}
+	if r := add(gA, inc, true); r.Status != 409 {
+		t.Fatalf("same group again: %d %s", r.Status, r.Raw)
+	}
+	if r := add(gB, inc, true); r.Status != 201 || groupOf() != "Flat" {
+		t.Fatalf("move: %d %s group=%v", r.Status, r.Raw, groupOf())
+	}
+	if raw := e.do(t, "GET", "/v1/groups/"+gB+"/incomes", tok, nil).Raw; !strings.Contains(string(raw), inc) {
+		t.Fatalf("the group should list the income: %s", raw)
+	}
+	if raw := e.do(t, "GET", "/v1/groups/"+gA+"/incomes", tok, nil).Raw; strings.Contains(string(raw), inc) {
+		t.Fatalf("the old group must no longer list it: %s", raw)
+	}
+	// A label only: the balance is unchanged and the group's spending is untouched.
+	if e.balance(t, tok, acct) != 1049000 {
+		t.Fatalf("filing an income must not change the balance: %d", e.balance(t, tok, acct))
+	}
+	if g := e.do(t, "GET", "/v1/groups/"+gB, tok, nil).data(); i64(g, "spent_total") != 0 {
+		t.Fatalf("an income must not count as group spending: %v", g)
+	}
+	lst, _ := e.do(t, "GET", "/v1/groups/"+gB+"/incomes", tok, nil).Body["data"].([]any)
+	id := str(lst[0].(map[string]any), "id")
+	if r := e.do(t, "POST", "/v1/group-incomes/"+id+"/void", tok, nil); r.Status != 200 || groupOf() != nil {
+		t.Fatalf("remove from group: %d %s group=%v", r.Status, r.Raw, groupOf())
+	}
+	// Another person cannot file or see it.
+	tok2, _, _ := e.signUp(t, "ben@example.com")
+	if r := e.do(t, "POST", "/v1/groups/"+gB+"/incomes", tok2, map[string]any{"transaction_id": inc}); r.Status != 404 {
+		t.Fatalf("a non-member must get 404: %d", r.Status)
+	}
+	assertLedger(t)
+}
+
+func TestAGroupCanTurnSplittingOffAndThenTakesEachExpenseWhole(t *testing.T) {
+	e := setup(t)
+	tok, _, _ := e.signUp(t, "asha@example.com")
+	acct := e.newAccount(t, tok, "HDFC", "savings", 1000000)
+	mk := e.call(t, "POST", "/v1/groups", tok, newKey(), map[string]any{"name": "Solo pot", "currency": "INR", "split_enabled": false})
+	if mk.Status != 201 || mk.data()["split_enabled"] != false {
+		t.Fatalf("create without splitting: %d %s", mk.Status, mk.Raw)
+	}
+	gid, me := str(mk.data(), "id"), str(mk.data(), "my_member_id")
+	if g := e.call(t, "POST", "/v1/groups", tok, newKey(), map[string]any{"name": "Default", "currency": "INR"}); g.data()["split_enabled"] != true {
+		t.Fatalf("splitting is on unless switched off: %s", g.Raw)
+	}
+	ben := e.addPerson(t, tok, gid, "Ben")
+	tx1 := str(e.spend(t, tok, acct, 20000, map[string]any{"title": "Taxi"}).data(), "id")
+	// Splitting between two people is refused.
+	if r := e.groupExpense(t, tok, gid, map[string]any{"title": "Taxi", "amount": 20000, "split_method": "equal", "participants": parts(me, 0, ben, 0), "transaction_id": tx1}); r.Status != 422 {
+		t.Fatalf("a split in a group that does not split: %d %s", r.Status, r.Raw)
+	}
+	// The whole amount, with only the payer, is fine and counts fully as theirs.
+	if r := e.groupExpense(t, tok, gid, map[string]any{"title": "Taxi", "amount": 20000, "split_method": "equal", "participants": parts(me, 0), "transaction_id": tx1}); r.Status != 201 {
+		t.Fatalf("whole expense: %d %s", r.Status, r.Raw)
+	}
+	if m := e.members(t, tok, gid); i64(m[ben], "net") != 0 || i64(m[me], "net") != 0 {
+		t.Fatalf("nobody owes anyone: %v", m)
+	}
+	if si := e.do(t, "GET", "/v1/transactions/"+tx1+"/share", tok, nil).data(); i64(si, "participants") != 1 {
+		t.Fatalf("share info should say one participant: %v", si)
+	}
+	// Turning splitting on (admin only) allows it again.
+	g := e.do(t, "GET", "/v1/groups/"+gid, tok, nil).data()
+	up := e.do(t, "PUT", "/v1/groups/"+gid, tok, map[string]any{"split_enabled": true, "version": g["version"]})
+	if up.Status != 200 || up.data()["split_enabled"] != true || up.data()["name"] != "Solo pot" {
+		t.Fatalf("toggle: %d %s", up.Status, up.Raw)
+	}
+	tx2 := str(e.spend(t, tok, acct, 10000, map[string]any{"title": "Lunch"}).data(), "id")
+	if r := e.groupExpense(t, tok, gid, map[string]any{"title": "Lunch", "amount": 10000, "split_method": "equal", "participants": parts(me, 0, ben, 0), "transaction_id": tx2}); r.Status != 201 {
+		t.Fatalf("split after turning it on: %d %s", r.Status, r.Raw)
+	}
+	assertLedger(t)
+}
+
+func TestAGroupExpenseTakesTheDateOfTheTransactionItIsMadeFrom(t *testing.T) {
+	e := setup(t)
+	tok, _, _ := e.signUp(t, "asha@example.com")
+	acct := e.newAccount(t, tok, "HDFC", "savings", 1000000)
+	gid, me := e.newGroup(t, tok, "Goa trip")
+	old := time.Now().UTC().AddDate(0, 0, -20).Truncate(time.Second)
+	txID := str(e.spend(t, tok, acct, 12000, map[string]any{"title": "Old dinner", "occurred_at": old.Format(time.RFC3339)}).data(), "id")
+	r := e.groupExpense(t, tok, gid, map[string]any{"title": "Old dinner", "amount": 12000, "split_method": "equal", "participants": parts(me, 0), "transaction_id": txID})
+	if r.Status != 201 {
+		t.Fatalf("share: %d %s", r.Status, r.Raw)
+	}
+	got, err := time.Parse(time.RFC3339, str(r.data(), "occurred_at"))
+	if err != nil || !got.Equal(old) {
+		t.Fatalf("the group expense should be dated %s like its transaction, got %v", old, r.data()["occurred_at"])
+	}
 }

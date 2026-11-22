@@ -111,7 +111,7 @@ func (p *Purger) Purge(ctx context.Context, userID string) error {
 			if others == 0 {
 				for _, q := range []string{
 					`DELETE FROM expense_shares WHERE expense_id IN (SELECT id FROM group_expenses WHERE group_id=$1)`,
-					`DELETE FROM group_expenses WHERE group_id=$1`, `DELETE FROM group_settlements WHERE group_id=$1`, `DELETE FROM group_topups WHERE group_id=$1`,
+					`DELETE FROM group_expenses WHERE group_id=$1`, `DELETE FROM group_incomes WHERE group_id=$1`, `DELETE FROM group_settlements WHERE group_id=$1`, `DELETE FROM group_topups WHERE group_id=$1`,
 					`DELETE FROM groups WHERE id=$1`,
 				} {
 					if _, err := tx.Exec(ctx, q, gid); err != nil {
@@ -144,6 +144,9 @@ func (p *Purger) Purge(ctx context.Context, userID string) error {
 			if _, err := tx.Exec(ctx, `UPDATE `+t+` SET transaction_id=NULL WHERE transaction_id IN (SELECT id FROM transactions WHERE user_id=$1)`, userID); err != nil {
 				return err
 			}
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM group_incomes WHERE transaction_id IN (SELECT id FROM transactions WHERE user_id=$1)`, userID); err != nil {
+			return err
 		}
 		// 2. Everything the user owns, children before parents.
 		steps := []string{
